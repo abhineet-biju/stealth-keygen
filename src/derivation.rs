@@ -14,7 +14,7 @@ use zeroize::{Zeroize, Zeroizing};
 const TWEAK_TAG: &[u8] = b"stealth-keygen-v1-tweak";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DeriveError {
+pub enum DeriveError {
     InvalidSharedSecret,
     InvalidSpendPublicKey,
     InvalidPaymentPublicKey,
