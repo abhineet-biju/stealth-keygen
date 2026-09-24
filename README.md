@@ -17,3 +17,10 @@ This library explores stealth key generation as a step toward building our Turbi
 - `sha2` — SHA-2 hashing for discovery tags, scalar tweaks, and signing.
 - `x25519-dalek` — X25519 key agreement, with the `static_secrets` feature enabled.
 - `zeroize` — Clearing sensitive key material and temporary buffers from memory.
+
+## Tests
+
+Run `cargo test --locked` for unit tests and the public payment-flow integration
+tests. Signatures are checked with `ed25519-dalek`, a test-only dependency.
+Fixed vectors and their independent Python generator are documented in
+[tests/fixtures/README.md](tests/fixtures/README.md).

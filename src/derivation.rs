@@ -122,3 +122,94 @@ pub(crate) fn payment_public_key(
 
     Ok(payment)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{hex, vector};
+    use curve25519_dalek::constants::EIGHT_TORSION;
+
+    #[test]
+    fn rfc7748_shared_secret_matches() {
+        let a = X25519Secret::from(hex::<32>(
+            "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+        ));
+        let b = X25519PublicKey::from(hex::<32>(
+            "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+        ));
+        let secret = PaymentSharedSecret::derive_secret(&a, &b).unwrap();
+        assert_eq!(
+            secret.0.to_bytes(),
+            hex::<32>("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742")
+        );
+    }
+
+    #[test]
+    fn shared_secret_tag_and_tweak_match_independent_vector() {
+        let scan = X25519Secret::from(vector::<32>("scan_entropy"));
+        let ephemeral = X25519Secret::from(vector::<32>("ephemeral_entropy"));
+        let sender =
+            PaymentSharedSecret::derive_secret(&ephemeral, &X25519PublicKey::from(&scan)).unwrap();
+        let recipient =
+            PaymentSharedSecret::derive_secret(&scan, &X25519PublicKey::from(&ephemeral)).unwrap();
+        assert_eq!(sender.0.to_bytes(), vector::<32>("shared_secret"));
+        assert_eq!(recipient.0.to_bytes(), vector::<32>("shared_secret"));
+        assert_eq!(sender.discovery_tag(), vector::<1>("discovery_tag")[0]);
+        assert_eq!(sender.tweak().to_bytes(), vector::<32>("tweak"));
+        assert_eq!(recipient.tweak().to_bytes(), vector::<32>("tweak"));
+    }
+
+    #[test]
+    fn low_order_x25519_inputs_are_rejected() {
+        let secret = X25519Secret::from([9; 32]);
+        for encoding in [
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        ] {
+            let peer = X25519PublicKey::from(hex::<32>(encoding));
+            assert!(matches!(
+                PaymentSharedSecret::derive_secret(&secret, &peer),
+                Err(DeriveError::InvalidSharedSecret)
+            ));
+        }
+    }
+
+    #[test]
+    fn small_order_spend_points_are_rejected() {
+        for point in EIGHT_TORSION {
+            assert_eq!(
+                payment_public_key(&point, &Scalar::ONE),
+                Err(DeriveError::InvalidSpendPublicKey)
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_torsion_spend_points_are_rejected() {
+        for torsion in EIGHT_TORSION.iter().skip(1) {
+            assert_eq!(
+                payment_public_key(&(ED25519_BASEPOINT_POINT + torsion), &Scalar::ONE),
+                Err(DeriveError::InvalidSpendPublicKey)
+            );
+        }
+    }
+
+    #[test]
+    fn cancellation_to_identity_is_rejected() {
+        assert_eq!(
+            payment_public_key(&ED25519_BASEPOINT_POINT, &(-Scalar::ONE)),
+            Err(DeriveError::InvalidPaymentPublicKey)
+        );
+    }
+
+    #[test]
+    fn zero_tweak_preserves_valid_spend_point() {
+        assert_eq!(
+            payment_public_key(&ED25519_BASEPOINT_POINT, &Scalar::ZERO),
+            Ok(ED25519_BASEPOINT_POINT)
+        );
+    }
+}

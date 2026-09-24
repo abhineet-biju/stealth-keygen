@@ -92,3 +92,44 @@ where
         shared_secret,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        RecipientSecretKeys,
+        test_support::{TestRngError, identity_rng, payment_rng, vector},
+    };
+
+    #[test]
+    fn sender_output_matches_independent_vector() {
+        let recipient = RecipientSecretKeys::generate(&mut identity_rng()).unwrap();
+        let payment = derive_payment(&recipient.derive_public_keys(), &mut payment_rng()).unwrap();
+        assert_eq!(payment.payment_public_key, vector::<32>("payment_public"));
+        assert_eq!(
+            payment.announcement.ephemeral_public_key,
+            vector::<32>("ephemeral_public")
+        );
+        assert_eq!(
+            payment.announcement.discovery_tag,
+            vector::<1>("discovery_tag")[0]
+        );
+        assert_eq!(
+            payment.shared_secret().tweak().to_bytes(),
+            vector::<32>("tweak")
+        );
+    }
+
+    #[test]
+    fn sender_propagates_randomness_failure() {
+        let public = RecipientSecretKeys::generate(&mut identity_rng())
+            .unwrap()
+            .derive_public_keys();
+        let mut rng = payment_rng().failing_on(1);
+        assert!(matches!(
+            derive_payment(&public, &mut rng),
+            Err(SenderError::Randomness(TestRngError::InjectedFailure))
+        ));
+        assert_eq!(rng.calls, 1);
+    }
+}

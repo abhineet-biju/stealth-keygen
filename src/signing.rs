@@ -67,3 +67,25 @@ impl RecoveredPayment {
         signature
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        RecipientSecretKeys, derive_payment, recover_payment,
+        test_support::{identity_rng, payment_rng, vector},
+    };
+    use curve25519_dalek::Scalar;
+
+    #[test]
+    fn signing_matches_independent_vector_and_response_is_canonical() {
+        let recipient = RecipientSecretKeys::generate(&mut identity_rng()).unwrap();
+        let sent = derive_payment(&recipient.derive_public_keys(), &mut payment_rng()).unwrap();
+        let recovered = recover_payment(&recipient, &sent.announcement)
+            .unwrap()
+            .unwrap();
+        let signature = recovered.sign(b"stealth-keygen test vector");
+        assert_eq!(signature, vector::<64>("signature"));
+        let response: [u8; 32] = signature[32..].try_into().unwrap();
+        assert!(bool::from(Scalar::from_canonical_bytes(response).is_some()));
+    }
+}

@@ -76,3 +76,37 @@ pub fn recover_payment(
         shared_secret,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        derive_payment,
+        test_support::{identity_rng, payment_rng, vector},
+    };
+    use curve25519_dalek::constants::ED25519_BASEPOINT_POINT;
+
+    #[test]
+    fn recovered_scalar_and_shared_material_match_independent_vector() {
+        let recipient = RecipientSecretKeys::generate(&mut identity_rng()).unwrap();
+        let sent = derive_payment(&recipient.derive_public_keys(), &mut payment_rng()).unwrap();
+        let recovered = recover_payment(&recipient, &sent.announcement)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovered.payment_private_key().to_bytes(),
+            vector::<32>("payment_scalar")
+        );
+        assert_eq!(recovered.payment_public_key, vector::<32>("payment_public"));
+        assert_eq!(
+            (recovered.payment_private_key() * ED25519_BASEPOINT_POINT)
+                .compress()
+                .to_bytes(),
+            sent.payment_public_key
+        );
+        assert_eq!(
+            recovered.shared_secret().tweak().to_bytes(),
+            sent.shared_secret().tweak().to_bytes()
+        );
+    }
+}
