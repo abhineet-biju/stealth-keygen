@@ -30,6 +30,25 @@ same `ElGamalContext`. The client must check a decrypted balance copy against
 the ElGamal balance before trusting it. Encryption, proof generation, and
 account operations belong to the consuming application.
 
+## Public API
+
+| Function or method | Purpose |
+|---|---|
+| `RecipientSecretKeys::generate(&mut rng)` | Generate the recipient's private spend and scan keys. |
+| `recipient.derive_public_keys()` | Obtain the public keys shared with senders. |
+| `public_keys.spend_public_key_bytes()` | Export the public spend key as 32 bytes. |
+| `public_keys.scan_public_key_bytes()` | Export the public scan key as 32 bytes. |
+| `derive_payment(&public_keys, &mut rng)` | Derive a one-time payment public key and discovery announcement. |
+| `recover_payment(&secret_keys, &announcement)` | Recover a candidate payment; returns `Ok(None)` if the discovery tag does not match. |
+| `recovered.sign(message)` | Sign message bytes with the recovered payment key. |
+| `payment.derive_elgamal_keypair(&context)` | Derive the account's ElGamal encryption keypair. |
+| `payment.derive_balance_key(&context)` | Derive the symmetric key for the encrypted available-balance copy. |
+
+Encryption-key derivation is available on both `SenderPayment` and
+`RecoveredPayment`. Both parties must supply the same `ElGamalContext`,
+containing the chain genesis hash, application program ID, mint, and token-account
+address as 32-byte fields.
+
 ## Dependencies
 
 - `curve25519-dalek` — Edwards point and scalar arithmetic for spend and payment keys.
