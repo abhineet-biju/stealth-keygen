@@ -10,9 +10,20 @@ A matching discovery tag identifies a candidate; the recipient must check the de
 
 This library explores stealth key generation as a step toward building our Turbin3 Builders capstone project.
 
+## Key derivation
+
+`derive_payment(&public_keys, &mut rng)` uses HKDF-SHA256 with the fixed public
+salt `stealth-keygen-v2` and separate `discovery-tag` and `spend-tweak` labels.
+Announcements contain only the ephemeral public key and discovery tag; neither
+a salt nor a scheme identifier needs to be included.
+
+The original SHA-256-only derivation is no longer supported. Existing HKDF
+outputs are unchanged. ElGamal key derivation is not implemented yet.
+
 ## Dependencies
 
 - `curve25519-dalek` — Edwards point and scalar arithmetic for spend and payment keys.
+- `hkdf` — HKDF-SHA256 extraction and expansion for discovery tags and spending tweaks.
 - `rand_core` — Cryptographic RNG traits for generating key material.
 - `sha2` — SHA-2 hashing for discovery tags, scalar tweaks, and signing.
 - `x25519-dalek` — X25519 key agreement, with the `static_secrets` feature enabled.

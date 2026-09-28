@@ -1,14 +1,20 @@
 # Test vectors
 
-`v1.txt` fixes the output bytes for the custom `stealth-keygen-v1-tweak` and
-`stealth-keygen-v1-nonce` domains. It is not an SLNT compatibility vector.
+`hkdf.txt` fixes the HKDF-SHA256 PRK, discovery tag, 64-byte tweak material,
+reduced tweak, recovered scalar, payment public key, and signature.
 All secrets in this file are deterministic public test inputs.
 
+The salt remains `stealth-keygen-v2`; its expansion labels are `discovery-tag`
+and `spend-tweak`. The signing domain remains `stealth-keygen-v1-nonce`.
+These versioned strings are cryptographic constants, not selectable schemes.
+Renaming either would change outputs. The fixture is byte-identical to the
+previous `v2.txt`; the legacy SHA-256-only fixture has been removed.
+
 Generate it with `python3 scripts/generate_test_vectors.py`. The script uses
-Python's standard library, separate curve arithmetic, and the published
-[RFC 7748 section 6.1](https://www.rfc-editor.org/rfc/rfc7748#section-6.1) and
-[RFC 8032 section 7.1](https://www.rfc-editor.org/rfc/rfc8032#section-7.1)
-vectors to check its reference calculations before generating the fixture.
+Python's standard library and separate curve arithmetic, checked against
+[RFC 7748 section 6.1](https://www.rfc-editor.org/rfc/rfc7748#section-6.1),
+[RFC 8032 section 7.1](https://www.rfc-editor.org/rfc/rfc8032#section-7.1), and
+[RFC 5869 appendix A.1](https://www.rfc-editor.org/rfc/rfc5869#appendix-A.1).
 
 The Rust tests consume committed expected values. They never regenerate them.
 Changing a vector requires review of the protocol change, not just rerunning

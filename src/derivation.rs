@@ -1,23 +1,26 @@
 //! Shared cryptographic calculations for stealth payments.
 //!
-//! This module implements the Stealth Keygen v1 discovery-tag and tweak derivation.
+//! Uses HKDF-SHA256 with a fixed public salt and separate purpose labels.
 
 use curve25519_dalek::{EdwardsPoint, Scalar, constants::ED25519_BASEPOINT_POINT};
-use sha2::{Digest, Sha256};
+use hkdf::Hkdf;
+use sha2::Sha256;
 use x25519_dalek::{
     PublicKey as X25519PublicKey, SharedSecret as X25519SharedSecret, StaticSecret as X25519Secret,
 };
 use zeroize::{Zeroize, Zeroizing};
 
-/// Protocol constant. Do not change this during ordinary crate upgrades.
-/// Note: changing this label changes the derived tags, tweaks, and addresses.
-const TWEAK_TAG: &[u8] = b"stealth-keygen-v1-tweak";
+/// Protocol constants. Changing these bytes changes the derived addresses.
+const HKDF_SALT: &[u8] = b"stealth-keygen-v2";
+const DISCOVERY_INFO: &[u8] = b"discovery-tag";
+const TWEAK_INFO: &[u8] = b"spend-tweak";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeriveError {
     InvalidSharedSecret,
     InvalidSpendPublicKey,
     InvalidPaymentPublicKey,
+    InvalidKdfOutputLength,
 }
 
 /// A shared secret that has passed the X25519 contributory check.
@@ -46,56 +49,31 @@ impl PaymentSharedSecret {
         Ok(Self(shared))
     }
 
-    /// Derive the public one-byte discovery filter:
-    ///
-    /// discovery-tag = SHA256(len(tag) || tag || S)[0]
-    pub(crate) fn discovery_tag(&self) -> u8 {
-        let mut hasher = tweak_hasher();
-        hasher.update(self.0.as_bytes());
-
-        let mut digest = hasher.finalize();
-        let discovery_tag = digest[0];
-
-        digest[..].zeroize();
-
-        discovery_tag
+    /// Derive the public one-byte discovery filter.
+    /// HKDF-Expand(PRK, "discovery-tag", 1)
+    pub(crate) fn discovery_tag(&self) -> Result<u8, DeriveError> {
+        let mut tag = [0u8; 1];
+        self.expand(DISCOVERY_INFO, &mut tag)?;
+        Ok(tag[0])
     }
 
-    /// Derive the private scalar tweak:
-    ///
-    /// t = reduce_mod_l(
-    ///     SHA256(len(tag) || tag || S || discovery_tag)
-    /// )
-    ///
-    /// The digest is interpreted as a little-endian integer.
-    pub(crate) fn tweak(&self) -> Zeroizing<Scalar> {
-        let discovery_tag = self.discovery_tag();
-
-        let mut hasher = tweak_hasher();
-        hasher.update(self.0.as_bytes());
-        hasher.update([discovery_tag]);
-
-        let mut digest = hasher.finalize();
-
-        let mut digest_bytes = Zeroizing::new([0u8; 32]);
-        digest_bytes.copy_from_slice(&digest);
-
-        digest[..].zeroize();
-
-        Zeroizing::new(Scalar::from_bytes_mod_order(*digest_bytes))
+    /// Derive the private scalar tweak from 64 HKDF output bytes.
+    /// Interpret the output as a little-endian integer and reduce modulo l.
+    pub(crate) fn tweak(&self) -> Result<Zeroizing<Scalar>, DeriveError> {
+        let mut wide = Zeroizing::new([0u8; 64]);
+        self.expand(TWEAK_INFO, &mut wide[..])?;
+        Ok(Zeroizing::new(Scalar::from_bytes_mod_order_wide(&wide)))
     }
-}
 
-/// Initialize the hash with the scheme's length-prefixed domain tag.
-///
-/// The length occupies exactly one byte.
-fn tweak_hasher() -> Sha256 {
-    let mut hasher = Sha256::new();
-
-    hasher.update([TWEAK_TAG.len() as u8]);
-    hasher.update(TWEAK_TAG);
-
-    hasher
+    /// Extract from S with the fixed public salt, then expand for one purpose.
+    /// Repeating extraction reconstructs the same PRK without retaining another
+    /// long-lived secret. Callers keep secret output buffers zeroizing.
+    fn expand(&self, info: &[u8], output: &mut [u8]) -> Result<(), DeriveError> {
+        let (mut prk, hkdf) = Hkdf::<Sha256>::extract(Some(HKDF_SALT), self.0.as_bytes());
+        prk[..].zeroize();
+        hkdf.expand(info, output)
+            .map_err(|_| DeriveError::InvalidKdfOutputLength)
+    }
 }
 
 /// Derive the one-time payment public key:
@@ -130,6 +108,68 @@ mod tests {
     use curve25519_dalek::constants::EIGHT_TORSION;
 
     #[test]
+    fn hkdf_matches_rfc5869_case_one() {
+        let (mut prk, hkdf) =
+            Hkdf::<Sha256>::extract(Some(&(0u8..13).collect::<Vec<_>>()), &[0x0b; 22]);
+        assert_eq!(
+            prk[..],
+            hex::<32>("077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5")
+        );
+        let mut output = [0; 42];
+        hkdf.expand(&(0xf0u8..0xfa).collect::<Vec<_>>(), &mut output)
+            .unwrap();
+        assert_eq!(
+            output,
+            hex::<42>(
+                "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+            )
+        );
+        prk[..].zeroize();
+    }
+
+    #[test]
+    fn prk_tag_and_tweak_match_independent_vector() {
+        let scan = X25519Secret::from(vector::<32>("scan_entropy"));
+        let ephemeral = X25519Secret::from(vector::<32>("ephemeral_entropy"));
+        let sender =
+            PaymentSharedSecret::derive_secret(&ephemeral, &X25519PublicKey::from(&scan)).unwrap();
+        let recipient =
+            PaymentSharedSecret::derive_secret(&scan, &X25519PublicKey::from(&ephemeral)).unwrap();
+        let (mut prk, _) = Hkdf::<Sha256>::extract(Some(HKDF_SALT), sender.0.as_bytes());
+        assert_eq!(prk[..], vector::<32>("hkdf_prk"));
+        prk[..].zeroize();
+        let mut wide = Zeroizing::new([0; 64]);
+        sender.expand(TWEAK_INFO, &mut wide[..]).unwrap();
+        assert_eq!(*wide, vector::<64>("tweak_material"));
+        for secret in [&sender, &recipient] {
+            assert_eq!(
+                secret.discovery_tag().unwrap(),
+                vector::<1>("discovery_tag")[0]
+            );
+            assert_eq!(secret.tweak().unwrap().to_bytes(), vector::<32>("tweak"));
+        }
+    }
+
+    #[test]
+    fn purposes_are_separated_and_invalid_expansion_length_fails() {
+        let secret = PaymentSharedSecret::derive_secret(
+            &X25519Secret::from([3; 32]),
+            &X25519PublicKey::from(&X25519Secret::from([2; 32])),
+        )
+        .unwrap();
+        let mut discovery = Zeroizing::new([0; 64]);
+        let mut tweak = Zeroizing::new([0; 64]);
+        secret.expand(DISCOVERY_INFO, &mut discovery[..]).unwrap();
+        secret.expand(TWEAK_INFO, &mut tweak[..]).unwrap();
+        assert_ne!(*discovery, *tweak);
+        let mut oversized = Zeroizing::new(vec![0; 255 * 32 + 1]);
+        assert_eq!(
+            secret.expand(TWEAK_INFO, &mut oversized[..]),
+            Err(DeriveError::InvalidKdfOutputLength)
+        );
+    }
+
+    #[test]
     fn rfc7748_shared_secret_matches() {
         let a = X25519Secret::from(hex::<32>(
             "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
@@ -142,21 +182,6 @@ mod tests {
             secret.0.to_bytes(),
             hex::<32>("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742")
         );
-    }
-
-    #[test]
-    fn shared_secret_tag_and_tweak_match_independent_vector() {
-        let scan = X25519Secret::from(vector::<32>("scan_entropy"));
-        let ephemeral = X25519Secret::from(vector::<32>("ephemeral_entropy"));
-        let sender =
-            PaymentSharedSecret::derive_secret(&ephemeral, &X25519PublicKey::from(&scan)).unwrap();
-        let recipient =
-            PaymentSharedSecret::derive_secret(&scan, &X25519PublicKey::from(&ephemeral)).unwrap();
-        assert_eq!(sender.0.to_bytes(), vector::<32>("shared_secret"));
-        assert_eq!(recipient.0.to_bytes(), vector::<32>("shared_secret"));
-        assert_eq!(sender.discovery_tag(), vector::<1>("discovery_tag")[0]);
-        assert_eq!(sender.tweak().to_bytes(), vector::<32>("tweak"));
-        assert_eq!(recipient.tweak().to_bytes(), vector::<32>("tweak"));
     }
 
     #[test]

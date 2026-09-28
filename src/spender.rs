@@ -48,7 +48,7 @@ pub enum SenderError<E> {
     Derivation(DeriveError),
 }
 
-/// Derive a fresh payment destination for a recipient.
+/// Derive a fresh payment destination using HKDF-SHA256.
 pub fn derive_payment<R>(
     recipient: &RecipientPublicKeys,
     rng: &mut R,
@@ -74,8 +74,10 @@ where
             .map_err(SenderError::Derivation)?;
 
     // 4. Derive the public discovery tag and private tweak.
-    let discovery_tag = shared_secret.discovery_tag();
-    let tweak = shared_secret.tweak();
+    let discovery_tag = shared_secret
+        .discovery_tag()
+        .map_err(SenderError::Derivation)?;
+    let tweak = shared_secret.tweak().map_err(SenderError::Derivation)?;
 
     // 5. Compute P = B + t·G.
     let payment = payment_public_key(recipient.spend_public_key(), &tweak)
@@ -115,7 +117,7 @@ mod tests {
             vector::<1>("discovery_tag")[0]
         );
         assert_eq!(
-            payment.shared_secret().tweak().to_bytes(),
+            payment.shared_secret().tweak().unwrap().to_bytes(),
             vector::<32>("tweak")
         );
     }

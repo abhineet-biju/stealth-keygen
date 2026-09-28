@@ -81,7 +81,7 @@ pub fn hex<const N: usize>(input: &str) -> [u8; N] {
 }
 
 pub fn vector<const N: usize>(key: &str) -> [u8; N] {
-    let value = include_str!("../tests/fixtures/v1.txt")
+    let value = include_str!("../tests/fixtures/hkdf.txt")
         .lines()
         .filter_map(|line| line.split_once('='))
         .find(|(name, _)| *name == key)

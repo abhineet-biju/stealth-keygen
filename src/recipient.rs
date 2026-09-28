@@ -56,12 +56,15 @@ pub fn recover_payment(
             .map_err(RecipientError::Derivation)?;
 
     // 3. Reject announcements whose discovery tag does not match.
-    if shared_secret.discovery_tag() != announcement.discovery_tag {
+    let discovery_tag = shared_secret
+        .discovery_tag()
+        .map_err(RecipientError::Derivation)?;
+    if discovery_tag != announcement.discovery_tag {
         return Ok(None);
     }
 
     // 4. Derive the tweak and candidate public key P = B + t·G.
-    let tweak = shared_secret.tweak();
+    let tweak = shared_secret.tweak().map_err(RecipientError::Derivation)?;
     let public_keys = recipient.derive_public_keys();
     let payment = payment_public_key(public_keys.spend_public_key(), &tweak)
         .map_err(RecipientError::Derivation)?;
@@ -105,8 +108,8 @@ mod tests {
             sent.payment_public_key
         );
         assert_eq!(
-            recovered.shared_secret().tweak().to_bytes(),
-            sent.shared_secret().tweak().to_bytes()
+            recovered.shared_secret().tweak().unwrap().to_bytes(),
+            sent.shared_secret().tweak().unwrap().to_bytes()
         );
     }
 }
