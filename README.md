@@ -17,8 +17,12 @@ salt `stealth-keygen-v2` and separate `discovery-tag` and `spend-tweak` labels.
 Announcements contain only the ephemeral public key and discovery tag; neither
 a salt nor a scheme identifier needs to be included.
 
-The original SHA-256-only derivation is no longer supported. Existing HKDF
-outputs are unchanged. ElGamal key derivation is not implemented yet.
+The original SHA-256-only derivation is no longer supported. Existing stealth-address HKDF
+outputs are unchanged. Sender and recipient can also derive a shared ElGamal
+keypair with `derive_elgamal_keypair(&context)`. The context binds the key to a
+chain, application program, mint, and token account. Both parties can decrypt
+that account; only the recipient holds the payment signing key. Encryption,
+proof generation, and account operations belong to the consuming application.
 
 ## Dependencies
 
@@ -27,6 +31,7 @@ outputs are unchanged. ElGamal key derivation is not implemented yet.
 - `rand_core` — Cryptographic RNG traits for generating key material.
 - `sha2` — SHA-2 hashing for discovery tags, scalar tweaks, and signing.
 - `x25519-dalek` — X25519 key agreement, with the `static_secrets` feature enabled.
+- `solana-zk-sdk` — Solana-compatible ElGamal key types and public-key construction.
 - `zeroize` — Clearing sensitive key material and temporary buffers from memory.
 
 ## Tests

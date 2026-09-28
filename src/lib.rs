@@ -4,7 +4,7 @@ mod recipient;
 mod signing;
 mod spender;
 
-pub use derivation::DeriveError;
+pub use derivation::{DeriveError, ElGamalContext};
 pub use keys::*;
 pub use recipient::*;
 pub use spender::*;

@@ -5,6 +5,7 @@
 use curve25519_dalek::{EdwardsPoint, Scalar, constants::ED25519_BASEPOINT_POINT};
 use hkdf::Hkdf;
 use sha2::Sha256;
+use solana_zk_sdk::encryption::elgamal::{ElGamalKeypair, ElGamalSecretKey};
 use x25519_dalek::{
     PublicKey as X25519PublicKey, SharedSecret as X25519SharedSecret, StaticSecret as X25519Secret,
 };
@@ -14,6 +15,18 @@ use zeroize::{Zeroize, Zeroizing};
 const HKDF_SALT: &[u8] = b"stealth-keygen-v2";
 const DISCOVERY_INFO: &[u8] = b"discovery-tag";
 const TWEAK_INFO: &[u8] = b"spend-tweak";
+const ELGAMAL_INFO: &[u8] = b"elgamal-key-v1";
+
+/// Public account context. Both parties must use identical values.
+/// `chain_id` is the cluster genesis hash; the remaining fields are addresses.
+/// Encoding: chain_id || program_id || mint || token_account, each 32 bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ElGamalContext {
+    pub chain_id: [u8; 32],
+    pub program_id: [u8; 32],
+    pub mint: [u8; 32],
+    pub token_account: [u8; 32],
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeriveError {
@@ -21,6 +34,7 @@ pub enum DeriveError {
     InvalidSpendPublicKey,
     InvalidPaymentPublicKey,
     InvalidKdfOutputLength,
+    InvalidElGamalSecretKey,
 }
 
 /// A shared secret that has passed the X25519 contributory check.
@@ -65,6 +79,26 @@ impl PaymentSharedSecret {
         Ok(Zeroizing::new(Scalar::from_bytes_mod_order_wide(&wide)))
     }
 
+    /// Derive a per-account encryption keypair, known to sender and recipient.
+    pub(crate) fn elgamal_keypair(
+        &self,
+        context: &ElGamalContext,
+    ) -> Result<ElGamalKeypair, DeriveError> {
+        let mut info = [0u8; ELGAMAL_INFO.len() + 128];
+        info[..ELGAMAL_INFO.len()].copy_from_slice(ELGAMAL_INFO);
+        for (chunk, field) in info[ELGAMAL_INFO.len()..].chunks_exact_mut(32).zip([
+            &context.chain_id,
+            &context.program_id,
+            &context.mint,
+            &context.token_account,
+        ]) {
+            chunk.copy_from_slice(field);
+        }
+        let mut wide = Zeroizing::new([0u8; 64]);
+        self.expand(&info, &mut wide[..])?;
+        elgamal_keypair_from_material(&wide)
+    }
+
     /// Extract from S with the fixed public salt, then expand for one purpose.
     /// Repeating extraction reconstructs the same PRK without retaining another
     /// long-lived secret. Callers keep secret output buffers zeroizing.
@@ -74,6 +108,19 @@ impl PaymentSharedSecret {
         hkdf.expand(info, output)
             .map_err(|_| DeriveError::InvalidKdfOutputLength)
     }
+}
+
+/// Convert wide HKDF output without invoking another seed derivation scheme.
+fn elgamal_keypair_from_material(wide: &[u8; 64]) -> Result<ElGamalKeypair, DeriveError> {
+    let scalar = Zeroizing::new(Scalar::from_bytes_mod_order_wide(wide));
+    if *scalar == Scalar::ZERO {
+        return Err(DeriveError::InvalidElGamalSecretKey);
+    }
+    // Canonical bytes bridge our Dalek version and the SDK's Dalek version.
+    let bytes = Zeroizing::new(scalar.to_bytes());
+    let secret =
+        ElGamalSecretKey::try_from(&bytes[..]).map_err(|_| DeriveError::InvalidElGamalSecretKey)?;
+    Ok(ElGamalKeypair::new(secret))
 }
 
 /// Derive the one-time payment public key:
@@ -106,6 +153,81 @@ mod tests {
     use super::*;
     use crate::test_support::{hex, vector};
     use curve25519_dalek::constants::EIGHT_TORSION;
+
+    fn encryption_context() -> ElGamalContext {
+        ElGamalContext {
+            chain_id: [1; 32],
+            program_id: [2; 32],
+            mint: [3; 32],
+            token_account: [4; 32],
+        }
+    }
+
+    fn shared_secret() -> PaymentSharedSecret {
+        PaymentSharedSecret::derive_secret(
+            &X25519Secret::from(vector::<32>("ephemeral_entropy")),
+            &X25519PublicKey::from(vector::<32>("scan_public")),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn elgamal_derivation_matches_independent_context_and_scalar_vector() {
+        let shared = shared_secret();
+        let keypair = shared.elgamal_keypair(&encryption_context()).unwrap();
+        assert_eq!(keypair.secret().as_bytes(), &vector::<32>("elgamal_scalar"));
+        assert_ne!(
+            keypair.secret().as_bytes(),
+            &shared.tweak().unwrap().to_bytes()
+        );
+        let mut info = ELGAMAL_INFO.to_vec();
+        info.extend_from_slice(&vector::<128>("elgamal_context"));
+        let mut wide = [0; 64];
+        shared.expand(&info, &mut wide).unwrap();
+        assert_eq!(wide, vector::<64>("elgamal_material"));
+
+        // Check the SDK's twisted ElGamal public-key relation with our Dalek version.
+        let scalar = Scalar::from_canonical_bytes(vector::<32>("elgamal_scalar")).unwrap();
+        let public = curve25519_dalek::ristretto::CompressedRistretto(keypair.pubkey().to_bytes())
+            .decompress()
+            .unwrap();
+        let h = solana_zk_sdk::encryption::pedersen::H.compress().to_bytes();
+        assert_eq!((scalar * public).compress().to_bytes(), h);
+    }
+
+    #[test]
+    fn elgamal_context_fields_are_all_bound() {
+        let shared = shared_secret();
+        let base = encryption_context();
+        let original = shared.elgamal_keypair(&base).unwrap();
+        for field in 0..4 {
+            let mut changed = base;
+            match field {
+                0 => changed.chain_id[0] ^= 1,
+                1 => changed.program_id[0] ^= 1,
+                2 => changed.mint[0] ^= 1,
+                _ => changed.token_account[0] ^= 1,
+            }
+            let other = shared.elgamal_keypair(&changed).unwrap();
+            assert_ne!(original.pubkey(), other.pubkey());
+        }
+    }
+
+    #[test]
+    fn elgamal_rejects_material_that_reduces_to_zero() {
+        assert!(matches!(
+            elgamal_keypair_from_material(&[0; 64]),
+            Err(DeriveError::InvalidElGamalSecretKey)
+        ));
+        let mut order = [0; 64];
+        order[..32].copy_from_slice(&hex::<32>(
+            "edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010",
+        ));
+        assert!(matches!(
+            elgamal_keypair_from_material(&order),
+            Err(DeriveError::InvalidElGamalSecretKey)
+        ));
+    }
 
     #[test]
     fn hkdf_matches_rfc5869_case_one() {

@@ -4,11 +4,12 @@
 //! A matching discovery tag identifies a candidate.
 
 use curve25519_dalek::Scalar;
+use solana_zk_sdk::encryption::elgamal::ElGamalKeypair;
 use x25519_dalek::PublicKey as X25519PublicKey;
 use zeroize::Zeroizing;
 
 use crate::{
-    derivation::{DeriveError, PaymentSharedSecret, payment_public_key},
+    derivation::{DeriveError, ElGamalContext, PaymentSharedSecret, payment_public_key},
     keys::RecipientSecretKeys,
     spender::PaymentAnnouncement,
 };
@@ -25,6 +26,14 @@ pub struct RecoveredPayment {
 }
 
 impl RecoveredPayment {
+    /// Derive this account's encryption keypair. The sender can derive it too.
+    pub fn derive_elgamal_keypair(
+        &self,
+        context: &ElGamalContext,
+    ) -> Result<ElGamalKeypair, DeriveError> {
+        self.shared_secret().elgamal_keypair(context)
+    }
+
     /// Internal access for the future scalar-based signing module.
     pub(crate) fn payment_private_key(&self) -> &Scalar {
         &self.payment_scalar

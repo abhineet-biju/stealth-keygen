@@ -10,6 +10,63 @@ use stealth_keygen::{
 };
 use support::{ScriptedRng, TestRngError, identity_rng, payment_rng, vector};
 
+fn encryption_context() -> stealth_keygen::ElGamalContext {
+    stealth_keygen::ElGamalContext {
+        chain_id: [1; 32],
+        program_id: [2; 32],
+        mint: [3; 32],
+        token_account: [4; 32],
+    }
+}
+
+#[test]
+fn sender_and_recipient_derive_usable_elgamal_keys() {
+    let recipient = recipient(1, 2);
+    let sent = derive_payment(&recipient.derive_public_keys(), &mut payment_rng()).unwrap();
+    let recovered = recover_payment(&recipient, &sent.announcement)
+        .unwrap()
+        .unwrap();
+    let context = encryption_context();
+    let sender_keys = sent.derive_elgamal_keypair(&context).unwrap();
+    let recipient_keys = recovered.derive_elgamal_keypair(&context).unwrap();
+    assert_eq!(sender_keys.pubkey(), recipient_keys.pubkey());
+    assert_eq!(sender_keys.secret(), recipient_keys.secret());
+    assert_eq!(
+        sender_keys.secret().as_bytes(),
+        &vector::<32>("elgamal_scalar")
+    );
+    for amount in [0u64, 1, 42, 65_535] {
+        let ciphertext = sender_keys.pubkey().encrypt_u64(amount);
+        assert_eq!(
+            recipient_keys.secret().decrypt_u32(&ciphertext),
+            Some(amount)
+        );
+    }
+    // A consuming application can produce/verify proofs without library wrappers.
+    use solana_zk_sdk::zk_elgamal_proof_program::{
+        VerifyZkProof, build_pubkey_validity_proof_data,
+    };
+    let proof = build_pubkey_validity_proof_data(&sender_keys).unwrap();
+    proof.verify_proof().unwrap();
+}
+
+#[test]
+fn elgamal_is_deterministic_and_separate_for_each_payment() {
+    let recipient = recipient(1, 2);
+    let public = recipient.derive_public_keys();
+    let context = encryption_context();
+    let a = derive_payment(&public, &mut payment_rng()).unwrap();
+    let b = derive_payment(&public, &mut ScriptedRng::new(vec![4; 32])).unwrap();
+    assert_eq!(
+        a.derive_elgamal_keypair(&context).unwrap().pubkey(),
+        a.derive_elgamal_keypair(&context).unwrap().pubkey()
+    );
+    assert_ne!(
+        a.derive_elgamal_keypair(&context).unwrap().pubkey(),
+        b.derive_elgamal_keypair(&context).unwrap().pubkey()
+    );
+}
+
 fn recipient(spend: u8, scan: u8) -> RecipientSecretKeys {
     RecipientSecretKeys::generate(&mut ScriptedRng::new(
         [vec![spend; 64], vec![scan; 32]].concat(),

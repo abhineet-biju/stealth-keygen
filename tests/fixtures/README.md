@@ -20,3 +20,8 @@ The Rust tests consume committed expected values. They never regenerate them.
 Changing a vector requires review of the protocol change, not just rerunning
 the script until a failing test passes. The Python arithmetic is variable-time
 and must never be used with real secrets.
+
+The ElGamal fields use `elgamal-key-v1` followed by the fixed-width context
+`chain_id || program_id || mint || token_account`. Each field is 32 bytes.
+The generator independently checks the 64-byte expansion and reduced secret
+scalar; SDK interoperability tests check public-key construction and proofs.
