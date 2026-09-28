@@ -5,7 +5,10 @@
 use curve25519_dalek::{EdwardsPoint, Scalar, constants::ED25519_BASEPOINT_POINT};
 use hkdf::Hkdf;
 use sha2::Sha256;
-use solana_zk_sdk::encryption::elgamal::{ElGamalKeypair, ElGamalSecretKey};
+use solana_zk_sdk::encryption::{
+    auth_encryption::AeKey,
+    elgamal::{ElGamalKeypair, ElGamalSecretKey},
+};
 use x25519_dalek::{
     PublicKey as X25519PublicKey, SharedSecret as X25519SharedSecret, StaticSecret as X25519Secret,
 };
@@ -16,8 +19,10 @@ const HKDF_SALT: &[u8] = b"stealth-keygen-v2";
 const DISCOVERY_INFO: &[u8] = b"discovery-tag";
 const TWEAK_INFO: &[u8] = b"spend-tweak";
 const ELGAMAL_INFO: &[u8] = b"elgamal-key-v1";
+const BALANCE_INFO: &[u8] = b"balance-ae-key-v1";
 
-/// Public account context. Both parties must use identical values.
+/// Public account context for ElGamal and symmetric balance keys.
+/// Both parties must use identical values.
 /// `chain_id` is the cluster genesis hash; the remaining fields are addresses.
 /// Encoding: chain_id || program_id || mint || token_account, each 32 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +31,21 @@ pub struct ElGamalContext {
     pub program_id: [u8; 32],
     pub mint: [u8; 32],
     pub token_account: [u8; 32],
+}
+
+impl ElGamalContext {
+    fn encode(&self) -> [u8; 128] {
+        let mut bytes = [0; 128];
+        for (chunk, field) in bytes.chunks_exact_mut(32).zip([
+            &self.chain_id,
+            &self.program_id,
+            &self.mint,
+            &self.token_account,
+        ]) {
+            chunk.copy_from_slice(field);
+        }
+        bytes
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,17 +106,21 @@ impl PaymentSharedSecret {
     ) -> Result<ElGamalKeypair, DeriveError> {
         let mut info = [0u8; ELGAMAL_INFO.len() + 128];
         info[..ELGAMAL_INFO.len()].copy_from_slice(ELGAMAL_INFO);
-        for (chunk, field) in info[ELGAMAL_INFO.len()..].chunks_exact_mut(32).zip([
-            &context.chain_id,
-            &context.program_id,
-            &context.mint,
-            &context.token_account,
-        ]) {
-            chunk.copy_from_slice(field);
-        }
+        info[ELGAMAL_INFO.len()..].copy_from_slice(&context.encode());
         let mut wide = Zeroizing::new([0u8; 64]);
         self.expand(&info, &mut wide[..])?;
         elgamal_keypair_from_material(&wide)
+    }
+
+    /// Derive the 16-byte AES-GCM-SIV key for the encrypted balance copy.
+    /// This is independent of the ElGamal key and does not authorize spending.
+    pub(crate) fn balance_key(&self, context: &ElGamalContext) -> Result<AeKey, DeriveError> {
+        let mut info = [0u8; BALANCE_INFO.len() + 128];
+        info[..BALANCE_INFO.len()].copy_from_slice(BALANCE_INFO);
+        info[BALANCE_INFO.len()..].copy_from_slice(&context.encode());
+        let mut bytes = Zeroizing::new([0u8; 16]);
+        self.expand(&info, &mut bytes[..])?;
+        Ok(AeKey::from(*bytes))
     }
 
     /// Extract from S with the fixed public salt, then expand for one purpose.
@@ -169,6 +193,35 @@ mod tests {
             &X25519PublicKey::from(vector::<32>("scan_public")),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn balance_key_matches_independent_vector_and_is_domain_separated() {
+        let shared = shared_secret();
+        let context = encryption_context();
+        let key = shared.balance_key(&context).unwrap();
+        assert_eq!(key, AeKey::from(vector::<16>("balance_key")));
+        assert_eq!(key, shared.balance_key(&context).unwrap());
+        let mut elgamal_prefix = [0u8; 16];
+        elgamal_prefix.copy_from_slice(&vector::<64>("elgamal_material")[..16]);
+        assert_ne!(key, AeKey::from(elgamal_prefix));
+    }
+
+    #[test]
+    fn balance_key_binds_every_context_field() {
+        let shared = shared_secret();
+        let base = encryption_context();
+        let key = shared.balance_key(&base).unwrap();
+        for field in 0..4 {
+            let mut changed = base;
+            match field {
+                0 => changed.chain_id[0] ^= 1,
+                1 => changed.program_id[0] ^= 1,
+                2 => changed.mint[0] ^= 1,
+                _ => changed.token_account[0] ^= 1,
+            }
+            assert_ne!(key, shared.balance_key(&changed).unwrap());
+        }
     }
 
     #[test]

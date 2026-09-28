@@ -268,3 +268,69 @@ fn public_errors_preserve_randomness_failure() {
         Err(SenderError::Randomness(TestRngError::InjectedFailure))
     ));
 }
+
+#[test]
+fn balance_keys_agree_and_encrypt_full_u64_balances() {
+    let recipient = recipient(1, 2);
+    let sent = derive_payment(&recipient.derive_public_keys(), &mut payment_rng()).unwrap();
+    let recovered = recover_payment(&recipient, &sent.announcement)
+        .unwrap()
+        .unwrap();
+    let context = encryption_context();
+    let sender_key = sent.derive_balance_key(&context).unwrap();
+    let recipient_key = recovered.derive_balance_key(&context).unwrap();
+    assert_eq!(sender_key, recipient_key);
+    for amount in [0, 1, 42, u32::MAX as u64, u64::MAX] {
+        assert_eq!(
+            recipient_key.decrypt(&sender_key.encrypt(amount)),
+            Some(amount)
+        );
+        assert_eq!(
+            sender_key.decrypt(&recipient_key.encrypt(amount)),
+            Some(amount)
+        );
+    }
+}
+
+#[test]
+fn balance_key_recovery_is_deterministic_and_payment_specific() {
+    let recipient = recipient(1, 2);
+    let public = recipient.derive_public_keys();
+    let a = derive_payment(&public, &mut payment_rng()).unwrap();
+    let b = derive_payment(&public, &mut ScriptedRng::new(vec![4; 32])).unwrap();
+    let context = encryption_context();
+    let original = a.derive_balance_key(&context).unwrap();
+    let recovered = recover_payment(&recipient, &a.announcement)
+        .unwrap()
+        .unwrap();
+    assert_eq!(original, a.derive_balance_key(&context).unwrap());
+    assert_eq!(original, recovered.derive_balance_key(&context).unwrap());
+    let other = b.derive_balance_key(&context).unwrap();
+    assert_ne!(original, other);
+    assert_eq!(other.decrypt(&original.encrypt(42)), None);
+}
+
+#[test]
+fn balance_encryption_rejects_wrong_context_and_modified_ciphertext() {
+    use solana_zk_sdk::encryption::auth_encryption::AeCiphertext;
+    let recovered = payment();
+    let context = encryption_context();
+    let key = recovered.derive_balance_key(&context).unwrap();
+    let ciphertext = key.encrypt(42);
+    let mut changed = context;
+    changed.token_account[0] ^= 1;
+    assert_eq!(
+        recovered
+            .derive_balance_key(&changed)
+            .unwrap()
+            .decrypt(&ciphertext),
+        None
+    );
+    let original = ciphertext.to_bytes();
+    for i in 0..original.len() {
+        let mut corrupted = original;
+        corrupted[i] ^= 1;
+        let parsed = AeCiphertext::from_bytes(&corrupted).unwrap();
+        assert_eq!(key.decrypt(&parsed), None);
+    }
+}

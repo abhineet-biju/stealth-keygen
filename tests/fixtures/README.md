@@ -25,3 +25,7 @@ The ElGamal fields use `elgamal-key-v1` followed by the fixed-width context
 `chain_id || program_id || mint || token_account`. Each field is 32 bytes.
 The generator independently checks the 64-byte expansion and reduced secret
 scalar; SDK interoperability tests check public-key construction and proofs.
+
+The symmetric balance key uses `balance-ae-key-v1` followed by the same
+128-byte account context and expands to 16 bytes without scalar reduction.
+The `balance_key` fixture is derived independently with Python HMAC-SHA256.

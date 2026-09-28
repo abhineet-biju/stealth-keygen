@@ -21,17 +21,23 @@ The original SHA-256-only derivation is no longer supported. Existing stealth-ad
 outputs are unchanged. Sender and recipient can also derive a shared ElGamal
 keypair with `derive_elgamal_keypair(&context)`. The context binds the key to a
 chain, application program, mint, and token account. Both parties can decrypt
-that account; only the recipient holds the payment signing key. Encryption,
-proof generation, and account operations belong to the consuming application.
+that account; only the recipient holds the payment signing key.
+
+`derive_balance_key(&context)` derives the separate symmetric `AeKey` for the
+encrypted available-balance copy, using the `balance-ae-key-v1` label. Both
+methods are available on `SenderPayment` and `RecoveredPayment` and use the
+same `ElGamalContext`. The client must check a decrypted balance copy against
+the ElGamal balance before trusting it. Encryption, proof generation, and
+account operations belong to the consuming application.
 
 ## Dependencies
 
 - `curve25519-dalek` — Edwards point and scalar arithmetic for spend and payment keys.
-- `hkdf` — HKDF-SHA256 extraction and expansion for discovery tags and spending tweaks.
+- `hkdf` — HKDF-SHA256 extraction and expansion for discovery tags, spending tweaks, and account encryption keys.
 - `rand_core` — Cryptographic RNG traits for generating key material.
 - `sha2` — SHA-2 hashing for discovery tags, scalar tweaks, and signing.
 - `x25519-dalek` — X25519 key agreement, with the `static_secrets` feature enabled.
-- `solana-zk-sdk` — Solana-compatible ElGamal key types and public-key construction.
+- `solana-zk-sdk` — Solana-compatible ElGamal key types and symmetric balance encryption.
 - `zeroize` — Clearing sensitive key material and temporary buffers from memory.
 
 ## Tests

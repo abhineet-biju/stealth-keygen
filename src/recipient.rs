@@ -4,7 +4,7 @@
 //! A matching discovery tag identifies a candidate.
 
 use curve25519_dalek::Scalar;
-use solana_zk_sdk::encryption::elgamal::ElGamalKeypair;
+use solana_zk_sdk::encryption::{auth_encryption::AeKey, elgamal::ElGamalKeypair};
 use x25519_dalek::PublicKey as X25519PublicKey;
 use zeroize::Zeroizing;
 
@@ -32,6 +32,13 @@ impl RecoveredPayment {
         context: &ElGamalContext,
     ) -> Result<ElGamalKeypair, DeriveError> {
         self.shared_secret().elgamal_keypair(context)
+    }
+
+    /// Derive the symmetric key for this account's encrypted available-balance copy.
+    /// Both payer and recipient can derive this key; it does not authorize spending.
+    /// The decrypted copy must still be checked against the ElGamal balance.
+    pub fn derive_balance_key(&self, context: &ElGamalContext) -> Result<AeKey, DeriveError> {
+        self.shared_secret().balance_key(context)
     }
 
     /// Internal access for the future scalar-based signing module.
