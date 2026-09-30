@@ -13,14 +13,16 @@ This library explores stealth key generation as a step toward building our Turbi
 ## Key derivation
 
 `derive_payment(&public_keys, &mut rng)` uses HKDF-SHA256 with the fixed public
-salt `stealth-keygen-v2` and separate `discovery-tag` and `spend-tweak` labels.
+salt `stealth-keygen-v3` and separate `discovery-tag` and `spend-tweak` labels, each followed by the exact
+32-byte ephemeral public key `R` from the announcement.
 Announcements contain only the ephemeral public key and discovery tag; neither
 a salt nor a scheme identifier needs to be included.
 
-The original SHA-256-only derivation is no longer supported. Existing stealth-address HKDF
-outputs are unchanged. Sender and recipient can also derive a shared ElGamal
+The original SHA-256-only derivation is no longer supported. The previous HKDF schedule is also incompatible; this version binds `R`
+into every expansion. Sender and recipient can also derive a shared ElGamal
 keypair with `derive_elgamal_keypair(&context)`. The context binds the key to a
-chain, application program, mint, and token account. Both parties can decrypt
+chain, application program, mint, and token account, with expansion inputs
+encoded as `purpose || R || context`. Both parties can decrypt
 that account; only the recipient holds the payment signing key.
 
 `derive_balance_key(&context)` derives the separate symmetric `AeKey` for the

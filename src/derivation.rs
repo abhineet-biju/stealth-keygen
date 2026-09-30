@@ -15,7 +15,7 @@ use x25519_dalek::{
 use zeroize::{Zeroize, Zeroizing};
 
 /// Protocol constants. Changing these bytes changes the derived addresses.
-const HKDF_SALT: &[u8] = b"stealth-keygen-v2";
+const HKDF_SALT: &[u8] = b"stealth-keygen-v3";
 const DISCOVERY_INFO: &[u8] = b"discovery-tag";
 const TWEAK_INFO: &[u8] = b"spend-tweak";
 const ELGAMAL_INFO: &[u8] = b"elgamal-key-v1";
@@ -61,18 +61,24 @@ pub enum DeriveError {
 ///
 /// The field is private so callers cannot construct an unchecked value.
 /// Intentionally does not implement Debug, Clone, or Copy.
-pub(crate) struct PaymentSharedSecret(X25519SharedSecret);
+pub(crate) struct PaymentSharedSecret {
+    secret: X25519SharedSecret,
+    ephemeral_public_key: [u8; 32],
+}
 
 impl PaymentSharedSecret {
     /// Compute a shared secret and reject an all-zero result.
+    /// Bind the exact sender ephemeral bytes from the announcement on both sides.
+    /// Do not normalize R: X25519 accepts distinct encodings with the same secret.
     ///
     /// Sender:
-    ///     agree(ephemeral_secret, recipient_scan_public_key)
+    ///     derive_secret(ephemeral_secret, recipient_scan_public_key, R)
     /// Recipient:
-    ///     agree(recipient_scan_secret, ephemeral_public_key)
+    ///     derive_secret(recipient_scan_secret, ephemeral_public_key, R)
     pub(crate) fn derive_secret(
         own_secret: &X25519Secret,
         peer_public: &X25519PublicKey,
+        ephemeral_public_key: &[u8; 32],
     ) -> Result<Self, DeriveError> {
         let shared = own_secret.diffie_hellman(peer_public);
 
@@ -80,14 +86,17 @@ impl PaymentSharedSecret {
             return Err(DeriveError::InvalidSharedSecret);
         }
 
-        Ok(Self(shared))
+        Ok(Self {
+            secret: shared,
+            ephemeral_public_key: *ephemeral_public_key,
+        })
     }
 
     /// Derive the public one-byte discovery filter.
-    /// HKDF-Expand(PRK, "discovery-tag", 1)
+    /// HKDF-Expand(PRK, "discovery-tag" || R, 1)
     pub(crate) fn discovery_tag(&self) -> Result<u8, DeriveError> {
         let mut tag = [0u8; 1];
-        self.expand(DISCOVERY_INFO, &mut tag)?;
+        self.expand(DISCOVERY_INFO, &[], &mut tag)?;
         Ok(tag[0])
     }
 
@@ -95,7 +104,7 @@ impl PaymentSharedSecret {
     /// Interpret the output as a little-endian integer and reduce modulo l.
     pub(crate) fn tweak(&self) -> Result<Zeroizing<Scalar>, DeriveError> {
         let mut wide = Zeroizing::new([0u8; 64]);
-        self.expand(TWEAK_INFO, &mut wide[..])?;
+        self.expand(TWEAK_INFO, &[], &mut wide[..])?;
         Ok(Zeroizing::new(Scalar::from_bytes_mod_order_wide(&wide)))
     }
 
@@ -104,32 +113,26 @@ impl PaymentSharedSecret {
         &self,
         context: &ElGamalContext,
     ) -> Result<ElGamalKeypair, DeriveError> {
-        let mut info = [0u8; ELGAMAL_INFO.len() + 128];
-        info[..ELGAMAL_INFO.len()].copy_from_slice(ELGAMAL_INFO);
-        info[ELGAMAL_INFO.len()..].copy_from_slice(&context.encode());
         let mut wide = Zeroizing::new([0u8; 64]);
-        self.expand(&info, &mut wide[..])?;
+        self.expand(ELGAMAL_INFO, &context.encode(), &mut wide[..])?;
         elgamal_keypair_from_material(&wide)
     }
 
     /// Derive the 16-byte AES-GCM-SIV key for the encrypted balance copy.
     /// This is independent of the ElGamal key and does not authorize spending.
     pub(crate) fn balance_key(&self, context: &ElGamalContext) -> Result<AeKey, DeriveError> {
-        let mut info = [0u8; BALANCE_INFO.len() + 128];
-        info[..BALANCE_INFO.len()].copy_from_slice(BALANCE_INFO);
-        info[BALANCE_INFO.len()..].copy_from_slice(&context.encode());
         let mut bytes = Zeroizing::new([0u8; 16]);
-        self.expand(&info, &mut bytes[..])?;
+        self.expand(BALANCE_INFO, &context.encode(), &mut bytes[..])?;
         Ok(AeKey::from(*bytes))
     }
 
-    /// Extract from S with the fixed public salt, then expand for one purpose.
+    /// Expand with info = purpose || R || context, using fixed-width public fields.
     /// Repeating extraction reconstructs the same PRK without retaining another
     /// long-lived secret. Callers keep secret output buffers zeroizing.
-    fn expand(&self, info: &[u8], output: &mut [u8]) -> Result<(), DeriveError> {
-        let (mut prk, hkdf) = Hkdf::<Sha256>::extract(Some(HKDF_SALT), self.0.as_bytes());
+    fn expand(&self, purpose: &[u8], context: &[u8], output: &mut [u8]) -> Result<(), DeriveError> {
+        let (mut prk, hkdf) = Hkdf::<Sha256>::extract(Some(HKDF_SALT), self.secret.as_bytes());
         prk[..].zeroize();
-        hkdf.expand(info, output)
+        hkdf.expand_multi_info(&[purpose, &self.ephemeral_public_key, context], output)
             .map_err(|_| DeriveError::InvalidKdfOutputLength)
     }
 }
@@ -191,8 +194,37 @@ mod tests {
         PaymentSharedSecret::derive_secret(
             &X25519Secret::from(vector::<32>("ephemeral_entropy")),
             &X25519PublicKey::from(vector::<32>("scan_public")),
+            &vector::<32>("ephemeral_public"),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn equivalent_ephemeral_encodings_have_distinct_derivations() {
+        let scan = X25519Secret::from([2; 32]);
+        let r = X25519PublicKey::from(&X25519Secret::from([3; 32])).to_bytes();
+        let mut alias = r;
+        alias[31] ^= 0x80; // X25519 ignores this bit; our transcript must not.
+        let original =
+            PaymentSharedSecret::derive_secret(&scan, &X25519PublicKey::from(r), &r).unwrap();
+        let modified =
+            PaymentSharedSecret::derive_secret(&scan, &X25519PublicKey::from(alias), &alias)
+                .unwrap();
+        assert_eq!(original.secret.as_bytes(), modified.secret.as_bytes());
+        assert_ne!(
+            original.tweak().unwrap().to_bytes(),
+            modified.tweak().unwrap().to_bytes()
+        );
+        let context = encryption_context();
+        assert_ne!(
+            original.elgamal_keypair(&context).unwrap().pubkey(),
+            modified.elgamal_keypair(&context).unwrap().pubkey()
+        );
+        assert_ne!(
+            original.balance_key(&context).unwrap(),
+            modified.balance_key(&context).unwrap()
+        );
+        // A one-byte discovery tag can collide; it is not an identity check.
     }
 
     #[test]
@@ -233,10 +265,10 @@ mod tests {
             keypair.secret().as_bytes(),
             &shared.tweak().unwrap().to_bytes()
         );
-        let mut info = ELGAMAL_INFO.to_vec();
-        info.extend_from_slice(&vector::<128>("elgamal_context"));
         let mut wide = [0; 64];
-        shared.expand(&info, &mut wide).unwrap();
+        shared
+            .expand(ELGAMAL_INFO, &vector::<128>("elgamal_context"), &mut wide)
+            .unwrap();
         assert_eq!(wide, vector::<64>("elgamal_material"));
 
         // Check the SDK's twisted ElGamal public-key relation with our Dalek version.
@@ -306,15 +338,23 @@ mod tests {
     fn prk_tag_and_tweak_match_independent_vector() {
         let scan = X25519Secret::from(vector::<32>("scan_entropy"));
         let ephemeral = X25519Secret::from(vector::<32>("ephemeral_entropy"));
-        let sender =
-            PaymentSharedSecret::derive_secret(&ephemeral, &X25519PublicKey::from(&scan)).unwrap();
-        let recipient =
-            PaymentSharedSecret::derive_secret(&scan, &X25519PublicKey::from(&ephemeral)).unwrap();
-        let (mut prk, _) = Hkdf::<Sha256>::extract(Some(HKDF_SALT), sender.0.as_bytes());
+        let sender = PaymentSharedSecret::derive_secret(
+            &ephemeral,
+            &X25519PublicKey::from(&scan),
+            &X25519PublicKey::from(&ephemeral).to_bytes(),
+        )
+        .unwrap();
+        let recipient = PaymentSharedSecret::derive_secret(
+            &scan,
+            &X25519PublicKey::from(&ephemeral),
+            &X25519PublicKey::from(&ephemeral).to_bytes(),
+        )
+        .unwrap();
+        let (mut prk, _) = Hkdf::<Sha256>::extract(Some(HKDF_SALT), sender.secret.as_bytes());
         assert_eq!(prk[..], vector::<32>("hkdf_prk"));
         prk[..].zeroize();
         let mut wide = Zeroizing::new([0; 64]);
-        sender.expand(TWEAK_INFO, &mut wide[..]).unwrap();
+        sender.expand(TWEAK_INFO, &[], &mut wide[..]).unwrap();
         assert_eq!(*wide, vector::<64>("tweak_material"));
         for secret in [&sender, &recipient] {
             assert_eq!(
@@ -330,16 +370,19 @@ mod tests {
         let secret = PaymentSharedSecret::derive_secret(
             &X25519Secret::from([3; 32]),
             &X25519PublicKey::from(&X25519Secret::from([2; 32])),
+            &X25519PublicKey::from(&X25519Secret::from([3; 32])).to_bytes(),
         )
         .unwrap();
         let mut discovery = Zeroizing::new([0; 64]);
         let mut tweak = Zeroizing::new([0; 64]);
-        secret.expand(DISCOVERY_INFO, &mut discovery[..]).unwrap();
-        secret.expand(TWEAK_INFO, &mut tweak[..]).unwrap();
+        secret
+            .expand(DISCOVERY_INFO, &[], &mut discovery[..])
+            .unwrap();
+        secret.expand(TWEAK_INFO, &[], &mut tweak[..]).unwrap();
         assert_ne!(*discovery, *tweak);
         let mut oversized = Zeroizing::new(vec![0; 255 * 32 + 1]);
         assert_eq!(
-            secret.expand(TWEAK_INFO, &mut oversized[..]),
+            secret.expand(TWEAK_INFO, &[], &mut oversized[..]),
             Err(DeriveError::InvalidKdfOutputLength)
         );
     }
@@ -352,9 +395,11 @@ mod tests {
         let b = X25519PublicKey::from(hex::<32>(
             "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
         ));
-        let secret = PaymentSharedSecret::derive_secret(&a, &b).unwrap();
+        let secret =
+            PaymentSharedSecret::derive_secret(&a, &b, &X25519PublicKey::from(&a).to_bytes())
+                .unwrap();
         assert_eq!(
-            secret.0.to_bytes(),
+            secret.secret.to_bytes(),
             hex::<32>("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742")
         );
     }
@@ -371,7 +416,7 @@ mod tests {
         ] {
             let peer = X25519PublicKey::from(hex::<32>(encoding));
             assert!(matches!(
-                PaymentSharedSecret::derive_secret(&secret, &peer),
+                PaymentSharedSecret::derive_secret(&secret, &peer, &peer.to_bytes()),
                 Err(DeriveError::InvalidSharedSecret)
             ));
         }

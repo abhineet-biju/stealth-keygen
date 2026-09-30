@@ -85,9 +85,12 @@ where
 
     // 3. Compute S = X25519(r, recipient_scan_public_key).
     //    derive_secret rejects an all-zero shared secret.
-    let shared_secret =
-        PaymentSharedSecret::derive_secret(&ephemeral_secret, recipient.scan_public_key())
-            .map_err(SenderError::Derivation)?;
+    let shared_secret = PaymentSharedSecret::derive_secret(
+        &ephemeral_secret,
+        recipient.scan_public_key(),
+        &ephemeral_public.to_bytes(),
+    )
+    .map_err(SenderError::Derivation)?;
 
     // 4. Derive the public discovery tag and private tweak.
     let discovery_tag = shared_secret

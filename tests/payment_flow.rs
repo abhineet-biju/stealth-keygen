@@ -334,3 +334,19 @@ fn balance_encryption_rejects_wrong_context_and_modified_ciphertext() {
         assert_eq!(key.decrypt(&parsed), None);
     }
 }
+
+#[test]
+fn altered_ephemeral_encoding_cannot_recover_the_original_payment() {
+    let recipient = recipient(1, 2);
+    let sent = derive_payment(&recipient.derive_public_keys(), &mut payment_rng()).unwrap();
+    let mut announcement = sent.announcement.clone();
+    announcement.ephemeral_public_key[31] ^= 0x80;
+    // Try every tag, including the original: even a tag match must produce a
+    // different destination. This test does not rely on tags being collision-free.
+    for tag in 0..=u8::MAX {
+        announcement.discovery_tag = tag;
+        if let Some(candidate) = recover_payment(&recipient, &announcement).unwrap() {
+            assert_ne!(candidate.payment_public_key, sent.payment_public_key);
+        }
+    }
+}

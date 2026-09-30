@@ -67,9 +67,12 @@ pub fn recover_payment(
     let ephemeral_public = X25519PublicKey::from(announcement.ephemeral_public_key);
 
     // 2. Compute S = X25519(recipient_scan_secret, R).
-    let shared_secret =
-        PaymentSharedSecret::derive_secret(recipient.scan_private_key(), &ephemeral_public)
-            .map_err(RecipientError::Derivation)?;
+    let shared_secret = PaymentSharedSecret::derive_secret(
+        recipient.scan_private_key(),
+        &ephemeral_public,
+        &announcement.ephemeral_public_key,
+    )
+    .map_err(RecipientError::Derivation)?;
 
     // 3. Reject announcements whose discovery tag does not match.
     let discovery_tag = shared_secret
