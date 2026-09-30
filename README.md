@@ -10,6 +10,22 @@ A matching discovery tag identifies a candidate; the recipient must check the de
 
 This library explores stealth key generation as a step toward building our Turbin3 Builders capstone project.
 
+## Key notation
+
+Lowercase symbols denote private keys; uppercase symbols denote public keys.
+
+| Private | Public | Purpose |
+|---|---|---|
+| `a` | `A` | Recipient's long-term Ed25519 spend key. |
+| `b` | `B` | Recipient's long-term X25519 scan key. |
+| `r` | `R` | Ephemeral X25519 key for one payment. |
+| `e` | `E` | Account's ElGamal key, with `E = e⁻¹·H` using the SDK's Pedersen generator `H`. |
+| `p` | `P` | One-time Ed25519 payment signing key. |
+
+The Ed25519 signing nonce and nonce point are denoted `r_sig` and `R_sig`,
+separate from the ephemeral X25519 keys. These symbols match the diagram;
+they do not change the API or serialized bytes.
+
 ## Key derivation
 
 `derive_payment(&public_keys, &mut rng)` uses HKDF-SHA256 with the fixed public
@@ -75,5 +91,6 @@ address as 32-byte fields.
 Run `cargo test --locked` for unit tests and the public payment-flow integration
 tests. Signatures are checked with `ed25519-dalek`, a test-only dependency.
 SDK interoperability and disclosure tests also run with that command;
-`solana-zk-sdk` is a test-only dependency. Fixed vectors and their independent Python generator are documented in
+`solana-zk-sdk` is a test-only dependency. Fixed vectors and their independent
+Python generator are documented in
 [tests/fixtures/README.md](tests/fixtures/README.md).
