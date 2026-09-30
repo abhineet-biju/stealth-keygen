@@ -13,24 +13,33 @@ This library explores stealth key generation as a step toward building our Turbi
 ## Key derivation
 
 `derive_payment(&public_keys, &mut rng)` uses HKDF-SHA256 with the fixed public
-salt `stealth-keygen-v3` and separate `discovery-tag` and `spend-tweak` labels, each followed by the exact
-32-byte ephemeral public key `R` from the announcement.
-Announcements contain only the ephemeral public key and discovery tag; neither
-a salt nor a scheme identifier needs to be included.
+salt `stealth-keygen-v3`. Every expansion binds the exact 32-byte ephemeral
+public key `R` from the announcement:
 
-The original SHA-256-only derivation is no longer supported. The previous HKDF schedule is also incompatible; this version binds `R`
-into every expansion. Sender and recipient can also derive a shared ElGamal
-keypair with `derive_elgamal_keypair(&context)`. The context binds the key to a
-chain, application program, mint, and token account, with expansion inputs
-encoded as `purpose || R || context`. Both parties can decrypt
-that account; only the recipient holds the payment signing key.
+```text
+PRK    = Extract("stealth-keygen-v3", S)
+tag    = Expand(PRK, "discovery-tag" || R, 1)
+t      = reduce_mod_l(Expand(PRK, "spend-tweak" || R, 64))
+ct_ikm = Expand(PRK, "ct-ikm-v1" || R || C, 32)
+C      = chain_id || program_id || mint || token_account
+```
 
-`derive_balance_key(&context)` derives the separate symmetric `AeKey` for the
-encrypted available-balance copy, using the `balance-ae-key-v1` label. Both
-methods are available on `SenderPayment` and `RecoveredPayment` and use the
-same `ElGamalContext`. The client must check a decrypted balance copy against
-the ElGamal balance before trusting it. Encryption, proof generation, and
-account operations belong to the consuming application.
+Each context field is 32 bytes. Both parties derive the same `ct_ikm` with
+`derive_ct_ikm(&context)`. The consuming application passes
+`material.as_bytes()` to `solana_zk_sdk::encryption::derivation::derive_confidential_keys_from_ikm`,
+which uses HKDF-SHA512 to derive an ElGamal keypair and a symmetric `AeKey`.
+The library has no production dependency on the SDK; interoperability tests use 7.0.1.
+
+`ConfidentialKeyMaterial` clears its buffer on drop and has no `Debug`, `Clone`,
+or `Copy` implementation. Its bytes are secret. Disclosing them grants the
+account's full read access, but does not reveal the payment signing scalar.
+A receipt verifier must compare the derived ElGamal public key with the
+referenced transaction. The client must also check a decrypted balance hint
+against the ElGamal balance before trusting it.
+
+This schedule is incompatible with the earlier SHA-256 and unbound HKDF
+versions. Both parties must upgrade together; announcements carry no scheme
+identifier. Account creation, proofs, and receipt verification belong to the client.
 
 ## Public API
 
@@ -43,27 +52,28 @@ account operations belong to the consuming application.
 | `derive_payment(&public_keys, &mut rng)` | Derive a one-time payment public key and discovery announcement. |
 | `recover_payment(&secret_keys, &announcement)` | Recover a candidate payment; returns `Ok(None)` if the discovery tag does not match. |
 | `recovered.sign(message)` | Sign message bytes with the recovered payment key. |
-| `payment.derive_elgamal_keypair(&context)` | Derive the account's ElGamal encryption keypair. |
-| `payment.derive_balance_key(&context)` | Derive the symmetric key for the encrypted available-balance copy. |
+| `payment.derive_ct_ikm(&context)` | Derive protected input for the account's confidential keys. |
+| `material.as_bytes()` | Borrow secret bytes for SDK derivation or deliberate disclosure. |
+| `ConfidentialKeyMaterial::from_bytes(bytes)` | Import disclosed material for client-side verification. |
 
-Encryption-key derivation is available on both `SenderPayment` and
-`RecoveredPayment`. Both parties must supply the same `ElGamalContext`,
+Confidential-material derivation is available on both `SenderPayment` and
+`RecoveredPayment`. Both parties must supply the same `ConfidentialContext`,
 containing the chain genesis hash, application program ID, mint, and token-account
 address as 32-byte fields.
 
 ## Dependencies
 
-- `curve25519-dalek` — Edwards point and scalar arithmetic for spend and payment keys.
-- `hkdf` — HKDF-SHA256 extraction and expansion for discovery tags, spending tweaks, and account encryption keys.
-- `rand_core` — Cryptographic RNG traits for generating key material.
-- `sha2` — SHA-2 hashing for discovery tags, scalar tweaks, and signing.
-- `x25519-dalek` — X25519 key agreement, with the `static_secrets` feature enabled.
-- `solana-zk-sdk` — Solana-compatible ElGamal key types and symmetric balance encryption.
-- `zeroize` — Clearing sensitive key material and temporary buffers from memory.
+- `curve25519-dalek`: Edwards point and scalar arithmetic for spend and payment keys.
+- `hkdf`: HKDF-SHA256 extraction and expansion for discovery tags, spending tweaks, and confidential key material.
+- `rand_core`: Cryptographic RNG traits for generating key material.
+- `sha2`: SHA-2 hashing for discovery tags, scalar tweaks, and signing.
+- `x25519-dalek`: X25519 key agreement, with the `static_secrets` feature enabled.
+- `zeroize`: Clearing sensitive key material and temporary buffers from memory.
 
 ## Tests
 
 Run `cargo test --locked` for unit tests and the public payment-flow integration
 tests. Signatures are checked with `ed25519-dalek`, a test-only dependency.
-Fixed vectors and their independent Python generator are documented in
+SDK interoperability and disclosure tests also run with that command;
+`solana-zk-sdk` is a test-only dependency. Fixed vectors and their independent Python generator are documented in
 [tests/fixtures/README.md](tests/fixtures/README.md).

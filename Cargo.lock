@@ -374,6 +374,15 @@ dependencies = [
 
 [[package]]
 name = "hkdf"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
+dependencies = [
+ "hmac 0.12.1",
+]
+
+[[package]]
+name = "hkdf"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018"
@@ -872,21 +881,23 @@ dependencies = [
 
 [[package]]
 name = "solana-zk-sdk"
-version = "6.0.1"
+version = "7.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9664f023aac0b5976cb036684cd3d5ab3c4f12beadafafdcf87c3ba19f868887"
+checksum = "96cd8535d2f40d43a1d47af2849e1c86706a597a2ad84207441f51a50f09d8fd"
 dependencies = [
  "aes-gcm-siv",
  "base64",
  "bincode",
  "bytemuck",
  "curve25519-dalek 4.1.3",
+ "hkdf 0.12.4",
  "itertools",
  "merlin",
  "rand",
  "serde",
  "serde_derive",
  "serde_json",
+ "sha2 0.10.9",
  "sha3",
  "solana-address",
  "solana-derivation-path",
@@ -930,7 +941,7 @@ version = "0.1.0"
 dependencies = [
  "curve25519-dalek 5.0.0",
  "ed25519-dalek",
- "hkdf",
+ "hkdf 0.13.0",
  "rand_core 0.10.1",
  "sha2 0.11.0",
  "solana-zk-sdk",

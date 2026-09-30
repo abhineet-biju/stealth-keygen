@@ -5,10 +5,6 @@
 use curve25519_dalek::{EdwardsPoint, Scalar, constants::ED25519_BASEPOINT_POINT};
 use hkdf::Hkdf;
 use sha2::Sha256;
-use solana_zk_sdk::encryption::{
-    auth_encryption::AeKey,
-    elgamal::{ElGamalKeypair, ElGamalSecretKey},
-};
 use x25519_dalek::{
     PublicKey as X25519PublicKey, SharedSecret as X25519SharedSecret, StaticSecret as X25519Secret,
 };
@@ -18,22 +14,21 @@ use zeroize::{Zeroize, Zeroizing};
 const HKDF_SALT: &[u8] = b"stealth-keygen-v3";
 const DISCOVERY_INFO: &[u8] = b"discovery-tag";
 const TWEAK_INFO: &[u8] = b"spend-tweak";
-const ELGAMAL_INFO: &[u8] = b"elgamal-key-v1";
-const BALANCE_INFO: &[u8] = b"balance-ae-key-v1";
+const CT_IKM_INFO: &[u8] = b"ct-ikm-v1";
 
 /// Public account context for ElGamal and symmetric balance keys.
 /// Both parties must use identical values.
 /// `chain_id` is the cluster genesis hash; the remaining fields are addresses.
 /// Encoding: chain_id || program_id || mint || token_account, each 32 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ElGamalContext {
+pub struct ConfidentialContext {
     pub chain_id: [u8; 32],
     pub program_id: [u8; 32],
     pub mint: [u8; 32],
     pub token_account: [u8; 32],
 }
 
-impl ElGamalContext {
+impl ConfidentialContext {
     fn encode(&self) -> [u8; 128] {
         let mut bytes = [0; 128];
         for (chunk, field) in bytes.chunks_exact_mut(32).zip([
@@ -48,13 +43,31 @@ impl ElGamalContext {
     }
 }
 
+/// Secret input for deriving one account's ElGamal and symmetric keys.
+/// Disclosure grants full read access to that account, but not signing authority.
+/// Cleared on drop; intentionally does not implement Debug, Clone, or Copy.
+pub struct ConfidentialKeyMaterial(Zeroizing<[u8; 32]>);
+
+impl ConfidentialKeyMaterial {
+    /// Import disclosed material. A receipt verifier must authenticate the derived
+    /// ElGamal public key against the referenced account or transaction.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
+    /// Borrow secret bytes for SDK derivation or deliberate disclosure.
+    /// Any copies made by the caller must be protected separately.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeriveError {
     InvalidSharedSecret,
     InvalidSpendPublicKey,
     InvalidPaymentPublicKey,
     InvalidKdfOutputLength,
-    InvalidElGamalSecretKey,
 }
 
 /// A shared secret that has passed the X25519 contributory check.
@@ -108,22 +121,14 @@ impl PaymentSharedSecret {
         Ok(Zeroizing::new(Scalar::from_bytes_mod_order_wide(&wide)))
     }
 
-    /// Derive a per-account encryption keypair, known to sender and recipient.
-    pub(crate) fn elgamal_keypair(
+    /// Derive account-scoped input for the client's confidential-key SDK.
+    pub(crate) fn ct_ikm(
         &self,
-        context: &ElGamalContext,
-    ) -> Result<ElGamalKeypair, DeriveError> {
-        let mut wide = Zeroizing::new([0u8; 64]);
-        self.expand(ELGAMAL_INFO, &context.encode(), &mut wide[..])?;
-        elgamal_keypair_from_material(&wide)
-    }
-
-    /// Derive the 16-byte AES-GCM-SIV key for the encrypted balance copy.
-    /// This is independent of the ElGamal key and does not authorize spending.
-    pub(crate) fn balance_key(&self, context: &ElGamalContext) -> Result<AeKey, DeriveError> {
-        let mut bytes = Zeroizing::new([0u8; 16]);
-        self.expand(BALANCE_INFO, &context.encode(), &mut bytes[..])?;
-        Ok(AeKey::from(*bytes))
+        context: &ConfidentialContext,
+    ) -> Result<ConfidentialKeyMaterial, DeriveError> {
+        let mut bytes = Zeroizing::new([0u8; 32]);
+        self.expand(CT_IKM_INFO, &context.encode(), &mut bytes[..])?;
+        Ok(ConfidentialKeyMaterial(bytes))
     }
 
     /// Expand with info = purpose || R || context, using fixed-width public fields.
@@ -135,19 +140,6 @@ impl PaymentSharedSecret {
         hkdf.expand_multi_info(&[purpose, &self.ephemeral_public_key, context], output)
             .map_err(|_| DeriveError::InvalidKdfOutputLength)
     }
-}
-
-/// Convert wide HKDF output without invoking another seed derivation scheme.
-fn elgamal_keypair_from_material(wide: &[u8; 64]) -> Result<ElGamalKeypair, DeriveError> {
-    let scalar = Zeroizing::new(Scalar::from_bytes_mod_order_wide(wide));
-    if *scalar == Scalar::ZERO {
-        return Err(DeriveError::InvalidElGamalSecretKey);
-    }
-    // Canonical bytes bridge our Dalek version and the SDK's Dalek version.
-    let bytes = Zeroizing::new(scalar.to_bytes());
-    let secret =
-        ElGamalSecretKey::try_from(&bytes[..]).map_err(|_| DeriveError::InvalidElGamalSecretKey)?;
-    Ok(ElGamalKeypair::new(secret))
 }
 
 /// Derive the one-time payment public key:
@@ -181,8 +173,8 @@ mod tests {
     use crate::test_support::{hex, vector};
     use curve25519_dalek::constants::EIGHT_TORSION;
 
-    fn encryption_context() -> ElGamalContext {
-        ElGamalContext {
+    fn encryption_context() -> ConfidentialContext {
+        ConfidentialContext {
             chain_id: [1; 32],
             program_id: [2; 32],
             mint: [3; 32],
@@ -217,74 +209,38 @@ mod tests {
         );
         let context = encryption_context();
         assert_ne!(
-            original.elgamal_keypair(&context).unwrap().pubkey(),
-            modified.elgamal_keypair(&context).unwrap().pubkey()
-        );
-        assert_ne!(
-            original.balance_key(&context).unwrap(),
-            modified.balance_key(&context).unwrap()
+            original.ct_ikm(&context).unwrap().as_bytes(),
+            modified.ct_ikm(&context).unwrap().as_bytes()
         );
         // A one-byte discovery tag can collide; it is not an identity check.
     }
 
     #[test]
-    fn balance_key_matches_independent_vector_and_is_domain_separated() {
+    fn ct_ikm_matches_independent_vector_and_is_domain_separated() {
         let shared = shared_secret();
         let context = encryption_context();
-        let key = shared.balance_key(&context).unwrap();
-        assert_eq!(key, AeKey::from(vector::<16>("balance_key")));
-        assert_eq!(key, shared.balance_key(&context).unwrap());
-        let mut elgamal_prefix = [0u8; 16];
-        elgamal_prefix.copy_from_slice(&vector::<64>("elgamal_material")[..16]);
-        assert_ne!(key, AeKey::from(elgamal_prefix));
-    }
-
-    #[test]
-    fn balance_key_binds_every_context_field() {
-        let shared = shared_secret();
-        let base = encryption_context();
-        let key = shared.balance_key(&base).unwrap();
-        for field in 0..4 {
-            let mut changed = base;
-            match field {
-                0 => changed.chain_id[0] ^= 1,
-                1 => changed.program_id[0] ^= 1,
-                2 => changed.mint[0] ^= 1,
-                _ => changed.token_account[0] ^= 1,
-            }
-            assert_ne!(key, shared.balance_key(&changed).unwrap());
-        }
-    }
-
-    #[test]
-    fn elgamal_derivation_matches_independent_context_and_scalar_vector() {
-        let shared = shared_secret();
-        let keypair = shared.elgamal_keypair(&encryption_context()).unwrap();
-        assert_eq!(keypair.secret().as_bytes(), &vector::<32>("elgamal_scalar"));
-        assert_ne!(
-            keypair.secret().as_bytes(),
-            &shared.tweak().unwrap().to_bytes()
+        assert_eq!(context.encode(), vector::<128>("confidential_context"));
+        let material = shared.ct_ikm(&context).unwrap();
+        assert_eq!(material.as_bytes(), &vector::<32>("ct_ikm"));
+        assert_eq!(
+            material.as_bytes(),
+            shared.ct_ikm(&context).unwrap().as_bytes()
         );
-        let mut wide = [0; 64];
+        assert_ne!(material.as_bytes(), &shared.tweak().unwrap().to_bytes());
+        let mut other_purpose = [0; 32];
         shared
-            .expand(ELGAMAL_INFO, &vector::<128>("elgamal_context"), &mut wide)
+            .expand(TWEAK_INFO, &context.encode(), &mut other_purpose)
             .unwrap();
-        assert_eq!(wide, vector::<64>("elgamal_material"));
-
-        // Check the SDK's twisted ElGamal public-key relation with our Dalek version.
-        let scalar = Scalar::from_canonical_bytes(vector::<32>("elgamal_scalar")).unwrap();
-        let public = curve25519_dalek::ristretto::CompressedRistretto(keypair.pubkey().to_bytes())
-            .decompress()
-            .unwrap();
-        let h = solana_zk_sdk::encryption::pedersen::H.compress().to_bytes();
-        assert_eq!((scalar * public).compress().to_bytes(), h);
+        assert_ne!(material.as_bytes(), &other_purpose);
+        let imported = ConfidentialKeyMaterial::from_bytes(*material.as_bytes());
+        assert_eq!(imported.as_bytes(), material.as_bytes());
     }
 
     #[test]
-    fn elgamal_context_fields_are_all_bound() {
+    fn ct_ikm_binds_every_context_field() {
         let shared = shared_secret();
         let base = encryption_context();
-        let original = shared.elgamal_keypair(&base).unwrap();
+        let material = shared.ct_ikm(&base).unwrap();
         for field in 0..4 {
             let mut changed = base;
             match field {
@@ -293,25 +249,11 @@ mod tests {
                 2 => changed.mint[0] ^= 1,
                 _ => changed.token_account[0] ^= 1,
             }
-            let other = shared.elgamal_keypair(&changed).unwrap();
-            assert_ne!(original.pubkey(), other.pubkey());
+            assert_ne!(
+                material.as_bytes(),
+                shared.ct_ikm(&changed).unwrap().as_bytes()
+            );
         }
-    }
-
-    #[test]
-    fn elgamal_rejects_material_that_reduces_to_zero() {
-        assert!(matches!(
-            elgamal_keypair_from_material(&[0; 64]),
-            Err(DeriveError::InvalidElGamalSecretKey)
-        ));
-        let mut order = [0; 64];
-        order[..32].copy_from_slice(&hex::<32>(
-            "edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010",
-        ));
-        assert!(matches!(
-            elgamal_keypair_from_material(&order),
-            Err(DeriveError::InvalidElGamalSecretKey)
-        ));
     }
 
     #[test]

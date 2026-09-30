@@ -4,12 +4,14 @@
 //! A matching discovery tag identifies a candidate.
 
 use curve25519_dalek::Scalar;
-use solana_zk_sdk::encryption::{auth_encryption::AeKey, elgamal::ElGamalKeypair};
 use x25519_dalek::PublicKey as X25519PublicKey;
 use zeroize::Zeroizing;
 
 use crate::{
-    derivation::{DeriveError, ElGamalContext, PaymentSharedSecret, payment_public_key},
+    derivation::{
+        ConfidentialContext, ConfidentialKeyMaterial, DeriveError, PaymentSharedSecret,
+        payment_public_key,
+    },
     keys::RecipientSecretKeys,
     spender::PaymentAnnouncement,
 };
@@ -26,27 +28,21 @@ pub struct RecoveredPayment {
 }
 
 impl RecoveredPayment {
-    /// Derive this account's encryption keypair. The sender can derive it too.
-    pub fn derive_elgamal_keypair(
+    /// Derive confidential-key material shared by the payer and recipient.
+    /// Disclosure grants this account's full read access, not spending authority.
+    pub fn derive_ct_ikm(
         &self,
-        context: &ElGamalContext,
-    ) -> Result<ElGamalKeypair, DeriveError> {
-        self.shared_secret().elgamal_keypair(context)
+        context: &ConfidentialContext,
+    ) -> Result<ConfidentialKeyMaterial, DeriveError> {
+        self.shared_secret().ct_ikm(context)
     }
 
-    /// Derive the symmetric key for this account's encrypted available-balance copy.
-    /// Both payer and recipient can derive this key; it does not authorize spending.
-    /// The decrypted copy must still be checked against the ElGamal balance.
-    pub fn derive_balance_key(&self, context: &ElGamalContext) -> Result<AeKey, DeriveError> {
-        self.shared_secret().balance_key(context)
-    }
-
-    /// Internal access for the future scalar-based signing module.
+    /// Internal access for scalar-based signing.
     pub(crate) fn payment_private_key(&self) -> &Scalar {
         &self.payment_scalar
     }
 
-    /// Internal access for the future encryption module.
+    /// Internal access for account-scoped key derivation.
     pub(crate) fn shared_secret(&self) -> &PaymentSharedSecret {
         &self.shared_secret
     }

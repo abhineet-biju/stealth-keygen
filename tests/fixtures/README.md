@@ -20,11 +20,12 @@ Changing a vector requires review of the protocol change, not just rerunning
 the script until a failing test passes. The Python arithmetic is variable-time
 and must never be used with real secrets.
 
-The ElGamal fields use `elgamal-key-v1` followed by `R` and the fixed-width context
+`ct_ikm` uses `ct-ikm-v1` followed by `R` and the fixed-width context
 `chain_id || program_id || mint || token_account`. Each field is 32 bytes.
-The generator independently checks the 64-byte expansion and reduced secret
-scalar; SDK interoperability tests check public-key construction and proofs.
+The 32-byte output is the input to the SDK's HKDF-SHA512 schedule, with salt
+`solana-conf-bal/v1`, label `elgamal` for 64 bytes reduced modulo the scalar
+order, and label `ae` for a 16-byte symmetric key.
 
-The symmetric balance key uses `balance-ae-key-v1` followed by `R` and the same
-128-byte account context and expands to 16 bytes without scalar reduction.
-The `balance_key` fixture is derived independently with Python HMAC-SHA256.
+The generator computes both stages independently with Python HMAC. The unit tests
+check `ct_ikm`; SDK integration tests check the resulting ElGamal scalar and
+balance key, encryption, key-validity proofs, and disclosure reconstruction.
