@@ -24,6 +24,24 @@ pub struct RecipientPublicKeys {
     scan: X25519PublicKey,
 }
 
+/// Payer's ephemeral X25519 secret material for one payment.
+/// Cleared on drop; intentionally does not implement Debug, Clone, or Copy.
+pub struct EphemeralSecret(X25519Secret);
+
+impl EphemeralSecret {
+    /// Import 32 secret bytes, for example from a per-payment KDF.
+    /// X25519 applies clamping when deriving public keys and shared secrets.
+    /// Any copies made by the caller must be protected separately.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(X25519Secret::from(bytes))
+    }
+
+    /// Internal access for payer-side key agreement.
+    pub(crate) fn private_key(&self) -> &X25519Secret {
+        &self.0
+    }
+}
+
 impl RecipientSecretKeys {
     /// Generate a fresh recipient identity.
     pub fn generate<R>(rng: &mut R) -> Result<Self, R::Error>
@@ -92,7 +110,74 @@ impl RecipientPublicKeys {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{ScriptedRng, TestRngError, identity_rng, vector};
+    use crate::{
+        DeriveError, SenderError,
+        derivation::PaymentSharedSecret,
+        derive_payment, derive_payment_with_ephemeral,
+        test_support::{ScriptedRng, TestRngError, identity_rng, payment_rng, vector},
+    };
+    use curve25519_dalek::constants::EIGHT_TORSION;
+
+    #[test]
+    fn supplied_ephemeral_rejects_invalid_recipient_keys() {
+        let public = RecipientSecretKeys::generate(&mut identity_rng())
+            .unwrap()
+            .derive_public_keys();
+        let ephemeral = EphemeralSecret::from_bytes(vector::<32>("ephemeral_entropy"));
+        for spend in EIGHT_TORSION.into_iter().chain(
+            EIGHT_TORSION
+                .iter()
+                .skip(1)
+                .map(|p| ED25519_BASEPOINT_POINT + p),
+        ) {
+            let invalid = RecipientPublicKeys {
+                spend,
+                scan: public.scan,
+            };
+            assert_eq!(
+                derive_payment_with_ephemeral(&invalid, &ephemeral).err(),
+                Some(DeriveError::InvalidSpendPublicKey)
+            );
+            assert!(matches!(
+                derive_payment(&invalid, &mut payment_rng()),
+                Err(SenderError::Derivation(DeriveError::InvalidSpendPublicKey))
+            ));
+        }
+        let invalid = RecipientPublicKeys {
+            scan: X25519PublicKey::from([0; 32]),
+            ..public
+        };
+        assert_eq!(
+            derive_payment_with_ephemeral(&invalid, &ephemeral).err(),
+            Some(DeriveError::InvalidSharedSecret)
+        );
+        assert!(matches!(
+            derive_payment(&invalid, &mut payment_rng()),
+            Err(SenderError::Derivation(DeriveError::InvalidSharedSecret))
+        ));
+    }
+
+    #[test]
+    fn supplied_ephemeral_rejects_payment_identity() {
+        let mut public = RecipientSecretKeys::generate(&mut identity_rng())
+            .unwrap()
+            .derive_public_keys();
+        let ephemeral = EphemeralSecret::from_bytes(vector::<32>("ephemeral_entropy"));
+        let r = X25519PublicKey::from(ephemeral.private_key()).to_bytes();
+        let shared =
+            PaymentSharedSecret::derive_secret(ephemeral.private_key(), &public.scan, &r).unwrap();
+        public.spend = -(*shared.tweak().unwrap() * ED25519_BASEPOINT_POINT);
+        assert_eq!(
+            derive_payment_with_ephemeral(&public, &ephemeral).err(),
+            Some(DeriveError::InvalidPaymentPublicKey)
+        );
+        assert!(matches!(
+            derive_payment(&public, &mut payment_rng()),
+            Err(SenderError::Derivation(
+                DeriveError::InvalidPaymentPublicKey
+            ))
+        ));
+    }
 
     #[test]
     fn public_keys_match_independent_vector() {

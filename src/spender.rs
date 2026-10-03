@@ -4,7 +4,7 @@
 //! The sender never obtains the recipient's payment signing key.
 
 use rand_core::TryCryptoRng;
-use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519Secret};
+use x25519_dalek::PublicKey as X25519PublicKey;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
         ConfidentialContext, ConfidentialKeyMaterial, DeriveError, PaymentSharedSecret,
         payment_public_key,
     },
-    keys::RecipientPublicKeys,
+    keys::{EphemeralSecret, RecipientPublicKeys},
 };
 
 /// Public discovery information for one payment.
@@ -61,6 +61,7 @@ pub enum SenderError<E> {
 }
 
 /// Derive a fresh payment destination using HKDF-SHA256.
+/// Generates ephemeral secret material and calls [`derive_payment_with_ephemeral`].
 pub fn derive_payment<R>(
     recipient: &RecipientPublicKeys,
     rng: &mut R,
@@ -68,37 +69,64 @@ pub fn derive_payment<R>(
 where
     R: TryCryptoRng + ?Sized,
 {
-    // 1. Generate fresh ephemeral private material r.
+    // Generate fresh ephemeral private material r.
     let mut ephemeral_bytes = Zeroizing::new([0u8; 32]);
 
     rng.try_fill_bytes(&mut ephemeral_bytes[..])
         .map_err(SenderError::Randomness)?;
 
-    let ephemeral_secret = X25519Secret::from(*ephemeral_bytes);
+    let ephemeral = EphemeralSecret::from_bytes(*ephemeral_bytes);
+    derive_payment_with_ephemeral(recipient, &ephemeral).map_err(SenderError::Derivation)
+}
 
-    // 2. Derive the public announcement key R.
-    let ephemeral_public = X25519PublicKey::from(&ephemeral_secret);
+/// Derive a payment destination from caller-supplied X25519 secret material r.
+/// The same recipient and r reconstruct the same P, R and discovery tag, and
+/// the same confidential context reconstructs the same ct_ikm.
+/// Use a fresh ephemeral key for each distinct payment; reuse it only to rebuild
+/// that payment. This function does not generate randomness or retain r.
+///
+/// R is returned in `announcement.ephemeral_public_key`. Derive the token-account
+/// address from R before building the context for [`SenderPayment::derive_ct_ikm`].
+///
+/// ```
+/// use stealth_keygen::{
+///     DeriveError, EphemeralSecret, RecipientPublicKeys, SenderPayment,
+///     derive_payment_with_ephemeral,
+/// };
+///
+/// fn rebuild_payment(
+///     recipient: &RecipientPublicKeys,
+///     r: [u8; 32],
+/// ) -> Result<SenderPayment, DeriveError> {
+///     let ephemeral = EphemeralSecret::from_bytes(r);
+///     derive_payment_with_ephemeral(recipient, &ephemeral)
+/// }
+/// ```
+pub fn derive_payment_with_ephemeral(
+    recipient: &RecipientPublicKeys,
+    ephemeral: &EphemeralSecret,
+) -> Result<SenderPayment, DeriveError> {
+    let ephemeral_secret = ephemeral.private_key();
 
-    // 3. Compute S = X25519(r, recipient_scan_public_key).
+    // 1. Derive the public announcement key R.
+    let ephemeral_public = X25519PublicKey::from(ephemeral_secret);
+
+    // 2. Compute S = X25519(r, recipient_scan_public_key).
     //    derive_secret rejects an all-zero shared secret.
     let shared_secret = PaymentSharedSecret::derive_secret(
-        &ephemeral_secret,
+        ephemeral_secret,
         recipient.scan_public_key(),
         &ephemeral_public.to_bytes(),
-    )
-    .map_err(SenderError::Derivation)?;
+    )?;
 
-    // 4. Derive the public discovery tag and private tweak.
-    let discovery_tag = shared_secret
-        .discovery_tag()
-        .map_err(SenderError::Derivation)?;
-    let tweak = shared_secret.tweak().map_err(SenderError::Derivation)?;
+    // 3. Derive the public discovery tag and private tweak.
+    let discovery_tag = shared_secret.discovery_tag()?;
+    let tweak = shared_secret.tweak()?;
 
-    // 5. Compute P = B + t·G.
-    let payment = payment_public_key(recipient.spend_public_key(), &tweak)
-        .map_err(SenderError::Derivation)?;
+    // 4. Compute P = B + t·G.
+    let payment = payment_public_key(recipient.spend_public_key(), &tweak)?;
 
-    // 6. Return public payment information and retain S privately
+    // 5. Return public payment information and retain S privately
     //    for account-scoped confidential-key derivation.
     Ok(SenderPayment {
         payment_public_key: payment.compress().to_bytes(),

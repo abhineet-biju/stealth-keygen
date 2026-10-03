@@ -9,8 +9,8 @@ use solana_zk_sdk::{
     zk_elgamal_proof_program::{VerifyZkProof, build_pubkey_validity_proof_data},
 };
 use stealth_keygen::{
-    ConfidentialContext, ConfidentialKeyMaterial, RecipientSecretKeys, derive_payment,
-    recover_payment,
+    ConfidentialContext, ConfidentialKeyMaterial, EphemeralSecret, RecipientSecretKeys,
+    derive_payment, derive_payment_with_ephemeral, recover_payment,
 };
 
 // Fixed bytes for tests only. Never use this RNG with real keys.
@@ -40,6 +40,13 @@ impl TryCryptoRng for TestRng {}
 fn payer_recipient_and_disclosure_derive_the_same_usable_keys() {
     let recipient = RecipientSecretKeys::generate(&mut TestRng(1)).expect("recipient");
     let sent = derive_payment(&recipient.derive_public_keys(), &mut TestRng(3)).expect("payment");
+    let rebuilt = derive_payment_with_ephemeral(
+        &recipient.derive_public_keys(),
+        &EphemeralSecret::from_bytes([3; 32]),
+    )
+    .expect("rebuilt payment");
+    assert_eq!(rebuilt.announcement, sent.announcement);
+    assert_eq!(rebuilt.payment_public_key, sent.payment_public_key);
     let recovered = recover_payment(&recipient, &sent.announcement)
         .expect("recovery")
         .expect("matching tag");
@@ -53,10 +60,12 @@ fn payer_recipient_and_disclosure_derive_the_same_usable_keys() {
     let received = recovered
         .derive_ct_ikm(&context)
         .expect("recipient material");
+    let resumed = rebuilt.derive_ct_ikm(&context).expect("rebuilt material");
+    assert_eq!(resumed.as_bytes(), material.as_bytes());
     let disclosed = ConfidentialKeyMaterial::from_bytes(*material.as_bytes());
     let (payer_eg, payer_ae) =
         derive_confidential_keys_from_ikm(material.as_bytes()).expect("payer keys");
-    for input in [&received, &disclosed] {
+    for input in [&received, &resumed, &disclosed] {
         let (eg, ae) = derive_confidential_keys_from_ikm(input.as_bytes()).expect("derived keys");
         assert_eq!(eg, payer_eg);
         assert_eq!(ae, payer_ae);

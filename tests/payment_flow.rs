@@ -5,8 +5,8 @@ mod support;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use stealth_keygen::{
-    DeriveError, PaymentAnnouncement, RecipientError, RecipientSecretKeys, RecoveredPayment,
-    SenderError, derive_payment, recover_payment,
+    DeriveError, EphemeralSecret, PaymentAnnouncement, RecipientError, RecipientSecretKeys,
+    RecoveredPayment, SenderError, derive_payment, derive_payment_with_ephemeral, recover_payment,
 };
 use support::{ScriptedRng, TestRngError, identity_rng, payment_rng, vector};
 
@@ -17,6 +17,100 @@ fn encryption_context() -> stealth_keygen::ConfidentialContext {
         mint: [3; 32],
         token_account: [4; 32],
     }
+}
+
+#[test]
+fn supplied_ephemeral_matches_random_api_and_independent_vectors() {
+    let recipient = RecipientSecretKeys::generate(&mut identity_rng()).unwrap();
+    let public = recipient.derive_public_keys();
+    let mut rng = payment_rng();
+    let random = derive_payment(&public, &mut rng).unwrap();
+    assert_eq!(rng.calls, 1);
+    let supplied = {
+        let ephemeral = EphemeralSecret::from_bytes(vector::<32>("ephemeral_entropy"));
+        derive_payment_with_ephemeral(&public, &ephemeral).unwrap()
+    };
+    assert_eq!(supplied.announcement, random.announcement);
+    assert_eq!(supplied.payment_public_key, random.payment_public_key);
+    assert_eq!(
+        supplied.announcement.ephemeral_public_key,
+        vector::<32>("ephemeral_public")
+    );
+    assert_eq!(
+        supplied.announcement.discovery_tag,
+        vector::<1>("discovery_tag")[0]
+    );
+    assert_eq!(supplied.payment_public_key, vector::<32>("payment_public"));
+    let context = encryption_context();
+    let material = supplied.derive_ct_ikm(&context).unwrap();
+    assert_eq!(material.as_bytes(), &vector::<32>("ct_ikm"));
+    assert_eq!(
+        material.as_bytes(),
+        random.derive_ct_ikm(&context).unwrap().as_bytes()
+    );
+    let recovered = recover_payment(&recipient, &supplied.announcement)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.payment_public_key, supplied.payment_public_key);
+    assert_eq!(
+        recovered.derive_ct_ikm(&context).unwrap().as_bytes(),
+        material.as_bytes()
+    );
+    assert_eq!(
+        recovered.sign(b"stealth-keygen test vector"),
+        vector::<64>("signature")
+    );
+}
+
+#[test]
+fn supplied_ephemeral_reconstructs_payment_after_drop() {
+    let public = recipient(1, 2).derive_public_keys();
+    let context = encryption_context();
+    let (announcement, payment_public_key, ct_ikm) = {
+        let ephemeral = EphemeralSecret::from_bytes(vector::<32>("ephemeral_entropy"));
+        let payment = derive_payment_with_ephemeral(&public, &ephemeral).unwrap();
+        let material = payment.derive_ct_ikm(&context).unwrap();
+        (
+            payment.announcement,
+            payment.payment_public_key,
+            *material.as_bytes(),
+        )
+    };
+    let ephemeral = EphemeralSecret::from_bytes(vector::<32>("ephemeral_entropy"));
+    let rebuilt = derive_payment_with_ephemeral(&public, &ephemeral).unwrap();
+    assert_eq!(rebuilt.announcement, announcement);
+    assert_eq!(rebuilt.payment_public_key, payment_public_key);
+    assert_eq!(rebuilt.derive_ct_ikm(&context).unwrap().as_bytes(), &ct_ikm);
+
+    let other =
+        derive_payment_with_ephemeral(&public, &EphemeralSecret::from_bytes([4; 32])).unwrap();
+    assert_ne!(
+        other.announcement.ephemeral_public_key,
+        announcement.ephemeral_public_key
+    );
+    assert_ne!(other.payment_public_key, payment_public_key);
+    assert_ne!(other.derive_ct_ikm(&context).unwrap().as_bytes(), &ct_ikm);
+}
+
+#[test]
+fn supplied_ephemeral_uses_x25519_clamping() {
+    let public = recipient(1, 2).derive_public_keys();
+    let bytes = vector::<32>("ephemeral_entropy");
+    let mut equivalent = bytes;
+    // X25519 clears the low three bits and top bit, and sets bit 254.
+    equivalent[0] ^= 7;
+    equivalent[31] ^= 0xc0;
+    let original =
+        derive_payment_with_ephemeral(&public, &EphemeralSecret::from_bytes(bytes)).unwrap();
+    let alias =
+        derive_payment_with_ephemeral(&public, &EphemeralSecret::from_bytes(equivalent)).unwrap();
+    assert_eq!(original.announcement, alias.announcement);
+    assert_eq!(original.payment_public_key, alias.payment_public_key);
+    let context = encryption_context();
+    assert_eq!(
+        original.derive_ct_ikm(&context).unwrap().as_bytes(),
+        alias.derive_ct_ikm(&context).unwrap().as_bytes()
+    );
 }
 
 #[test]
